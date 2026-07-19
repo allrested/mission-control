@@ -47,5 +47,18 @@ if [ -z "$API_KEY" ] || [ "$API_KEY" = "generate-a-random-key" ]; then
   export API_KEY
 fi
 
+# --- Hermes autostart (gateway + web dashboard) ---
+# Hermes lives on the data volume ($HOME=/app/.data) when installed via the
+# dashboard. Started in the background so channels (Telegram/WhatsApp) survive
+# container recreation. Set HERMES_AUTOSTART=false to disable.
+HERMES_BIN="$HOME/.local/bin/hermes"
+if [ "${HERMES_AUTOSTART:-true}" != "false" ] && [ -x "$HERMES_BIN" ]; then
+  mkdir -p "$HOME/.hermes/logs"
+  printf '[entrypoint] Starting hermes gateway\n'
+  "$HERMES_BIN" gateway run >> "$HOME/.hermes/logs/gateway-entrypoint.log" 2>&1 &
+  printf '[entrypoint] Starting hermes dashboard on :9119\n'
+  "$HERMES_BIN" dashboard --host 0.0.0.0 --no-open --skip-build >> "$HOME/.hermes/logs/dashboard-entrypoint.log" 2>&1 &
+fi
+
 printf '[entrypoint] Starting server\n'
 exec node server.js
