@@ -102,4 +102,4 @@ OpenAPI spec: `openapi.json`. Interactive docs at `/docs` when running.
 - **Standalone mode**: Use `node .next/standalone/server.js`, not `pnpm start` (which requires full `node_modules`)
 - **better-sqlite3**: Native addon -- needs rebuild when switching Node versions (`pnpm rebuild better-sqlite3`)
 - **AUTH_PASS with `#`**: Quote it (`AUTH_PASS="my#pass"`) or use `AUTH_PASS_B64` (base64-encoded)
-- **Gateway optional**: Set `NEXT_PUBLIC_GATEWAY_OPTIONAL=true` for standalone deployments without gateway connectivity
+- **Gateway optional**: Standalone (no gateway) is the default. Set `NEXT_PUBLIC_GATEWAY_OPTIONAL=false` to require an OpenClaw gateway

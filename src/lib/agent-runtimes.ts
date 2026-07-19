@@ -220,17 +220,17 @@ export interface RuntimeMeta {
 }
 
 const RUNTIME_META: Record<RuntimeId, RuntimeMeta> = {
-  openclaw: {
-    name: 'OpenClaw',
-    description: 'Multi-agent orchestration with gateway, sessions, and memory.',
-    authRequired: false,
-    authHint: '',
-  },
   hermes: {
     name: 'Hermes Agent',
     description: 'Self-improving AI agent with learning loop, skills, and multi-platform messaging.',
     authRequired: true,
     authHint: 'Run "hermes setup" or configure via Mission Control.',
+  },
+  openclaw: {
+    name: 'OpenClaw',
+    description: 'Multi-agent orchestration with gateway, sessions, and memory.',
+    authRequired: false,
+    authHint: '',
   },
   claude: {
     name: 'Claude Code',
@@ -508,8 +508,8 @@ function detectOpenCode(): RuntimeStatus {
 }
 
 const DETECTORS: Record<RuntimeId, () => RuntimeStatus> = {
-  openclaw: detectOpenClaw,
   hermes: detectHermes,
+  openclaw: detectOpenClaw,
   claude: detectClaude,
   codex: detectCodex,
   opencode: detectOpenCode,
@@ -587,7 +587,7 @@ export function startInstall(runtime: RuntimeId, mode: DeploymentMode): InstallJ
     codex: installCodexLocal,
     opencode: installOpenCodeLocal,
   }
-  const installFn = INSTALL_FNS[runtime] || installOpenClawLocal
+  const installFn = INSTALL_FNS[runtime] || installHermesLocal
   installFn(job).catch((err) => {
     job.status = 'failed'
     job.error = String(err?.message || err)

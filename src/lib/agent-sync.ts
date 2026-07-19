@@ -229,6 +229,92 @@ function mapAgentToMC(agent: OpenClawAgent): {
   return { name, role, config: configData, soul_content }
 }
 
+interface MappedAgent {
+  id: string
+  name: string
+  role: string
+  config: any
+  soul_content: string | null
+}
+
+/** Resolve the hermes home directory (mirrors /api/hermes route resolution) */
+function getHermesHome(): string {
+  const dataDir = resolve(config.dataDir || '.data')
+  const homeDir = config.homeDir || process.env.HOME || ''
+  if (readableDir(join(dataDir, '.hermes'))) return join(dataDir, '.hermes')
+  if (homeDir && readableDir(join(homeDir, '.hermes'))) return join(homeDir, '.hermes')
+  return join(dataDir, '.hermes')
+}
+
+function readableDir(p: string): boolean {
+  try { return require('fs').existsSync(p) } catch { return false }
+}
+
+/** Extract an indented scalar (`key: value`) from a top-level YAML block. */
+export function yamlBlockScalar(raw: string, block: string, key: string): string | null {
+  // ponytail: regex over a YAML dep — only flat scalars under one block are needed
+  const blockMatch = raw.match(new RegExp(`^${block}:[ \\t]*\\n((?:[ \\t]+.*\\n?)*)`, 'm'))
+  if (!blockMatch) return null
+  const kv = blockMatch[1].match(new RegExp(`^[ \\t]+${key}:[ \\t]*(.+)$`, 'm'))
+  return kv ? kv[1].trim() : null
+}
+
+/** Read the hermes agent (default profile) from the hermes home directory. */
+// ponytail: default profile only — extend to named profiles when someone runs them
+function readHermesAgents(): MappedAgent[] {
+  const hermesHome = getHermesHome()
+  const configPath = join(hermesHome, 'config.yaml')
+  const fs = require('fs')
+  if (!fs.existsSync(configPath)) {
+    throw new Error(`No hermes install found (${configPath} missing)`)
+  }
+  const raw = fs.readFileSync(configPath, 'utf-8')
+  const model = yamlBlockScalar(raw, 'model', 'default')
+  const provider = yamlBlockScalar(raw, 'model', 'provider')
+
+  let soul: string | null = null
+  try {
+    const soulPath = join(hermesHome, 'SOUL.md')
+    if (fs.existsSync(soulPath)) soul = fs.readFileSync(soulPath, 'utf-8')
+  } catch { /* soul is optional */ }
+
+  return [{
+    id: 'hermes-default',
+    name: 'Hermes',
+    role: 'assistant',
+    config: {
+      runtime: 'hermes',
+      hermesHome,
+      ...(model ? { model: { primary: provider ? `${provider}/${model}` : model } } : {}),
+      isDefault: true,
+    },
+    soul_content: soul,
+  }]
+}
+
+/** Sync the hermes agent (default profile) into the MC database */
+export async function syncAgentsFromHermes(actor: string = 'system', requestedWorkspaceId?: number): Promise<SyncResult> {
+  const workspaceId = resolveSharedRuntimeWorkspaceId(requestedWorkspaceId)
+  if (workspaceId === null) {
+    return {
+      synced: 0,
+      created: 0,
+      updated: 0,
+      agents: [],
+      error: 'Global agent sync requires one unambiguous shared workspace',
+    }
+  }
+
+  let mapped: MappedAgent[]
+  try {
+    mapped = readHermesAgents()
+  } catch (err: any) {
+    return { synced: 0, created: 0, updated: 0, agents: [], error: err.message }
+  }
+
+  return upsertMappedAgents(mapped, actor, workspaceId)
+}
+
 /** Sync agents from openclaw.json into the MC database */
 export async function syncAgentsFromConfig(actor: string = 'system', requestedWorkspaceId?: number): Promise<SyncResult> {
   const workspaceId = resolveSharedRuntimeWorkspaceId(requestedWorkspaceId)
@@ -253,6 +339,12 @@ export async function syncAgentsFromConfig(actor: string = 'system', requestedWo
     return { synced: 0, created: 0, updated: 0, agents: [] }
   }
 
+  const mapped = agents.map((agent) => ({ id: agent.id, ...mapAgentToMC(agent) }))
+  return upsertMappedAgents(mapped, actor, workspaceId)
+}
+
+/** Upsert pre-mapped agents into the MC database (shared by all sync sources) */
+function upsertMappedAgents(mappedAgents: MappedAgent[], actor: string, workspaceId: number): SyncResult {
   const db = getDatabase()
   const now = Math.floor(Date.now() / 1000)
   let created = 0
@@ -269,8 +361,7 @@ export async function syncAgentsFromConfig(actor: string = 'system', requestedWo
   `)
 
   db.transaction(() => {
-    for (const agent of agents) {
-      const mapped = mapAgentToMC(agent)
+    for (const mapped of mappedAgents) {
       const configJson = JSON.stringify(mapped.config)
       const existing = findByName.get(mapped.name, workspaceId) as any
 
@@ -285,20 +376,20 @@ export async function syncAgentsFromConfig(actor: string = 'system', requestedWo
           // Only overwrite soul_content if we read a new value from workspace
           const soulToWrite = mapped.soul_content ?? existingSoul
           updateAgent.run(mapped.role, configJson, soulToWrite, now, mapped.name, workspaceId)
-          results.push({ id: agent.id, name: mapped.name, action: 'updated' })
+          results.push({ id: mapped.id, name: mapped.name, action: 'updated' })
           updated++
         } else {
-          results.push({ id: agent.id, name: mapped.name, action: 'unchanged' })
+          results.push({ id: mapped.id, name: mapped.name, action: 'unchanged' })
         }
       } else {
         insertAgent.run(mapped.name, mapped.role, mapped.soul_content, now, now, configJson, workspaceId)
-        results.push({ id: agent.id, name: mapped.name, action: 'created' })
+        results.push({ id: mapped.id, name: mapped.name, action: 'created' })
         created++
       }
     }
   })()
 
-  const synced = agents.length
+  const synced = mappedAgents.length
 
   // Log audit event
   if (created > 0 || updated > 0) {

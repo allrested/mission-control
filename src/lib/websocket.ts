@@ -772,8 +772,9 @@ export function useWebSocket() {
           return
         }
 
-        // Gateway optional: don't retry — standalone mode is intentional
-        if (process.env.NEXT_PUBLIC_GATEWAY_OPTIONAL === 'true') {
+        // Gateway optional (the default): don't retry — standalone mode is
+        // intentional. Set NEXT_PUBLIC_GATEWAY_OPTIONAL=false to require a gateway.
+        if (process.env.NEXT_PUBLIC_GATEWAY_OPTIONAL !== 'false') {
           log.info('Gateway optional — skipping reconnect')
           setConnection({ reconnectAttempts: 0 })
           return

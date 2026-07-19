@@ -1,13 +1,18 @@
+import { existsSync } from 'node:fs'
 import { NextRequest, NextResponse } from 'next/server'
 import { requireRole } from '@/lib/auth'
-import { syncAgentsFromConfig, previewSyncDiff } from '@/lib/agent-sync'
+import { syncAgentsFromConfig, syncAgentsFromHermes, previewSyncDiff } from '@/lib/agent-sync'
 import { syncLocalAgents } from '@/lib/local-agent-sync'
+import { config } from '@/lib/config'
+import { isHermesInstalled } from '@/lib/hermes-sessions'
 import { logger } from '@/lib/logger'
 import { denyUnscopedResourceForStrictWorkspace } from '@/lib/workspace-isolation'
 
 /**
  * POST /api/agents/sync - Trigger agent config sync
- * ?source=local triggers local disk scan instead of openclaw.json sync.
+ * ?source=local triggers local disk scan; ?source=hermes syncs from the
+ * hermes home directory; ?source=openclaw forces openclaw.json.
+ * Default: openclaw.json when it exists, otherwise hermes when installed.
  * Requires admin role.
  */
 export async function POST(request: NextRequest) {
@@ -25,7 +30,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(result)
     }
 
-    const result = await syncAgentsFromConfig(auth.user.username, auth.user.workspace_id)
+    // Hermes-first default: openclaw.json is only preferred when it actually
+    // exists; a hermes install is otherwise the sync source.
+    const useHermes = source === 'hermes'
+      || (source !== 'openclaw' && !existsSync(config.openclawConfigPath) && isHermesInstalled())
+
+    const result = useHermes
+      ? await syncAgentsFromHermes(auth.user.username, auth.user.workspace_id)
+      : await syncAgentsFromConfig(auth.user.username, auth.user.workspace_id)
 
     if (result.error) {
       return NextResponse.json({ error: result.error }, { status: 500 })

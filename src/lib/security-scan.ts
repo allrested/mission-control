@@ -348,7 +348,7 @@ function scanOpenClaw(): Category {
   const configPath = config.openclawConfigPath
 
   if (!configPath || !existsSync(configPath)) {
-    const gatewayOptional = process.env.NEXT_PUBLIC_GATEWAY_OPTIONAL === 'true'
+    const gatewayOptional = process.env.NEXT_PUBLIC_GATEWAY_OPTIONAL !== 'false'
     checks.push({
       id: 'config_found',
       name: 'OpenClaw config found',

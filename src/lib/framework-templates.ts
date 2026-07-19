@@ -38,6 +38,24 @@ export interface FrameworkInfo {
 // ─── Framework Registry ─────────────────────────────────────────────────────
 
 export const FRAMEWORK_REGISTRY: Record<string, FrameworkInfo> = {
+  hermes: {
+    id: 'hermes',
+    label: 'Hermes Agent',
+    description: 'Local Hermes Agent runtime — sessions, memory, and config read from the hermes home directory',
+    docsUrl: 'https://github.com/NousResearch/hermes-agent',
+    connection: {
+      connectionMode: 'polling',
+      heartbeatInterval: 60,
+      setupHints: [
+        'Install Hermes from the Runtimes page or run the official installer',
+        'Sessions and status are read from the hermes home directory (~/.hermes)',
+        'Sync the agent via /agents → Sync config (hermes is the default source)',
+      ],
+      exampleSnippet: `# Hermes agents are detected automatically from the local install.
+# Configure the runtime with:  hermes setup
+# Then sync into Mission Control from the /agents page.`,
+    },
+  },
   openclaw: {
     id: 'openclaw',
     label: 'OpenClaw',
@@ -324,7 +342,7 @@ export const UNIVERSAL_TEMPLATES: UniversalTemplate[] = [
     label: 'Orchestrator',
     description: 'Coordinates other agents, routes tasks, and manages workflows. Full access.',
     emoji: '\ud83e\udded',
-    frameworks: ['openclaw', 'generic', 'langgraph', 'crewai', 'autogen', 'claude-sdk'],
+    frameworks: ['hermes', 'openclaw', 'generic', 'langgraph', 'crewai', 'autogen', 'claude-sdk'],
     capabilities: ['task_routing', 'agent_management', 'workflow_control', 'full_access'],
     openclawTemplateType: 'orchestrator',
   },
@@ -333,7 +351,7 @@ export const UNIVERSAL_TEMPLATES: UniversalTemplate[] = [
     label: 'Developer',
     description: 'Writes and edits code, runs builds and tests. Read-write workspace access.',
     emoji: '\ud83d\udee0\ufe0f',
-    frameworks: ['openclaw', 'generic', 'langgraph', 'crewai', 'autogen', 'claude-sdk'],
+    frameworks: ['hermes', 'openclaw', 'generic', 'langgraph', 'crewai', 'autogen', 'claude-sdk'],
     capabilities: ['code_write', 'code_execute', 'testing', 'debugging'],
     openclawTemplateType: 'developer',
   },
@@ -342,7 +360,7 @@ export const UNIVERSAL_TEMPLATES: UniversalTemplate[] = [
     label: 'Reviewer / QA',
     description: 'Reviews code and validates quality. Read-only access, lightweight model.',
     emoji: '\ud83d\udd2c',
-    frameworks: ['openclaw', 'generic', 'langgraph', 'crewai', 'autogen', 'claude-sdk'],
+    frameworks: ['hermes', 'openclaw', 'generic', 'langgraph', 'crewai', 'autogen', 'claude-sdk'],
     capabilities: ['code_read', 'quality_review', 'security_audit'],
     openclawTemplateType: 'reviewer',
   },
@@ -351,7 +369,7 @@ export const UNIVERSAL_TEMPLATES: UniversalTemplate[] = [
     label: 'Researcher',
     description: 'Browses the web and gathers information. No code execution.',
     emoji: '\ud83d\udd0d',
-    frameworks: ['openclaw', 'generic', 'langgraph', 'crewai', 'autogen', 'claude-sdk'],
+    frameworks: ['hermes', 'openclaw', 'generic', 'langgraph', 'crewai', 'autogen', 'claude-sdk'],
     capabilities: ['web_browse', 'data_gathering', 'summarization'],
     openclawTemplateType: 'researcher',
   },
@@ -360,7 +378,7 @@ export const UNIVERSAL_TEMPLATES: UniversalTemplate[] = [
     label: 'Content Creator',
     description: 'Generates and edits written content. No code execution or browsing.',
     emoji: '\u270f\ufe0f',
-    frameworks: ['openclaw', 'generic', 'langgraph', 'crewai', 'autogen', 'claude-sdk'],
+    frameworks: ['hermes', 'openclaw', 'generic', 'langgraph', 'crewai', 'autogen', 'claude-sdk'],
     capabilities: ['content_write', 'content_edit'],
     openclawTemplateType: 'content-creator',
   },
@@ -369,7 +387,7 @@ export const UNIVERSAL_TEMPLATES: UniversalTemplate[] = [
     label: 'Security Auditor',
     description: 'Scans for vulnerabilities. Read-only with shell access for scanning tools.',
     emoji: '\ud83d\udee1\ufe0f',
-    frameworks: ['openclaw', 'generic', 'langgraph', 'crewai', 'autogen', 'claude-sdk'],
+    frameworks: ['hermes', 'openclaw', 'generic', 'langgraph', 'crewai', 'autogen', 'claude-sdk'],
     capabilities: ['code_read', 'shell_execute', 'security_scan'],
     openclawTemplateType: 'security-auditor',
   },
