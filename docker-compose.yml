@@ -4,8 +4,14 @@ services:
     container_name: mission-control
     ports:
       - "${MC_PORT:-3000}:${PORT:-3000}"
+      # Hermes web dashboard (started manually: hermes dashboard --host 0.0.0.0)
+      - "${HERMES_DASHBOARD_PORT:-9119}:9119"
     environment:
       - PORT=${PORT:-3000}
+      # Effective home for the app and agent runtimes (hermes/claude/codex
+      # live under the data volume; detectors resolve paths via $HOME)
+      - HOME=/app/.data
+      - PATH=/app/.data/.local/bin:/app/.data/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       # ── Server-side gateway connection (MC backend → gateway) ──
       # host.docker.internal resolves to the Docker host on Docker Desktop (macOS/Windows).
       # On Linux, the extra_hosts entry below makes this work.
@@ -30,7 +36,11 @@ services:
       - path: .env
         required: false
     volumes:
-      - mc-data:/app/.data
+      # Data location — defaults to the named volume. Set MC_DATA_DIR in .env
+      # (or the shell) to a host path to bind-mount instead, e.g.:
+      #   MC_DATA_DIR=./data          (relative to this compose file)
+      #   MC_DATA_DIR=D:/mc-data      (Windows: use forward slashes)
+      - ${MC_DATA_DIR:-mc-data}:/app/.data
       # Optional: mount your OpenClaw state directory read-only so Mission Control
       # can read agent configs and memory. Uncomment and adjust the host path:
       # - ${OPENCLAW_HOME:-~/.openclaw}:/run/openclaw:ro
@@ -52,7 +62,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: ${MC_MEMORY_LIMIT:-2G}
           cpus: '1.0'
           pids: 256
     networks:
