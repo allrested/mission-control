@@ -281,8 +281,13 @@ export async function POST(request: NextRequest) {
         const profileDir = path.join(appConfig.homeDir, '.hermes', 'profiles', name)
         if (!fsExists(profileDir)) {
           mkdirSync(profileDir, { recursive: true })
-          // Write config.yaml with model from agent config or default
-          const model = finalConfig.model || 'claude-sonnet-4-6'
+          // Write config.yaml with model from agent config or default.
+          // finalConfig.model is the gateway shape ({ primary: "..." }); flatten
+          // to the scalar hermes expects.
+          const model =
+            (typeof finalConfig.model === 'object' && finalConfig.model?.primary)
+              ? finalConfig.model.primary
+              : (finalConfig.model || 'claude-sonnet-4-6')
           const provider = finalConfig.provider || 'anthropic'
           writeFileSync(
             path.join(profileDir, 'config.yaml'),

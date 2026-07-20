@@ -871,8 +871,11 @@ export function CreateAgentModal({
     sandboxMode: 'all' as 'all' | 'non-main',
     dockerNetwork: 'none' as 'none' | 'bridge',
     session_key: '',
-    write_to_gateway: true,
-    provision_openclaw_workspace: true,
+    runtime_type: 'hermes' as 'hermes' | 'claude' | 'codex' | 'openclaw',
+    // OpenClaw-only steps default off — they require a running gateway and the
+    // openclaw CLI, and error out otherwise. Auto-enabled below for openclaw.
+    write_to_gateway: false,
+    provision_openclaw_workspace: false,
   })
   const [isCreating, setIsCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -969,6 +972,7 @@ export function CreateAgentModal({
             role: formData.role,
             session_key: formData.session_key || undefined,
             template: selectedTemplate || undefined,
+            runtime_type: formData.runtime_type,
             write_to_gateway: formData.write_to_gateway,
             provision_openclaw_workspace: formData.provision_openclaw_workspace,
             gateway_config: {
@@ -1154,6 +1158,29 @@ export function CreateAgentModal({
                     placeholder="e.g. \ud83d\udee0\ufe0f"
                   />
                 </div>
+              </div>
+
+              <div>
+                <label className="block text-sm text-muted-foreground mb-1">Runtime</label>
+                <select
+                  value={formData.runtime_type}
+                  onChange={(e) => {
+                    const runtime_type = e.target.value as typeof formData.runtime_type
+                    setFormData(prev => ({
+                      ...prev,
+                      runtime_type,
+                      // OpenClaw provisioning/gateway only make sense for openclaw
+                      write_to_gateway: runtime_type === 'openclaw',
+                      provision_openclaw_workspace: runtime_type === 'openclaw',
+                    }))
+                  }}
+                  className="w-full bg-surface-1 text-foreground border border-border rounded-md px-3 py-2 focus:outline-hidden focus:ring-1 focus:ring-primary/50"
+                >
+                  <option value="hermes">Hermes Agent</option>
+                  <option value="claude">Claude Code</option>
+                  <option value="codex">Codex CLI</option>
+                  <option value="openclaw">OpenClaw (gateway)</option>
+                </select>
               </div>
 
               <div>
