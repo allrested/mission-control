@@ -40,6 +40,8 @@ interface DispatchableTask {
   agent_name: string
   agent_id: number
   agent_config: string | null
+  /** Agent's declared runtime (set by the create-agent Runtime picker). */
+  runtime_type?: string | null
   ticket_prefix: string | null
   project_ticket_no: number | null
   project_id: number | null
@@ -902,11 +904,28 @@ function isCodexCliAvailable(): boolean {
   } catch { return false }
 }
 
+/**
+ * The Hermes Agent CLI. When present, tasks assigned to a hermes-runtime agent
+ * dispatch through `hermes -z` (one-shot) using the operator's configured
+ * hermes provider/model — no API key needed here.
+ */
+let hermesCliAvailableCache: boolean | null = null
+function isHermesCliAvailable(): boolean {
+  try {
+    if (hermesCliAvailableCache !== null) return hermesCliAvailableCache
+    const { spawnSync } = require('node:child_process')
+    const r = spawnSync('hermes', ['--version'], { stdio: 'ignore', timeout: 5000 })
+    hermesCliAvailableCache = r.status === 0
+    return hermesCliAvailableCache
+  } catch { return false }
+}
+
 function isDirectDispatchAvailable(provider?: DirectProvider): boolean {
   if (provider === 'anthropic') return !!getAnthropicApiKey() || isClaudeCliAvailable()
   if (provider === 'openai') return !!getOpenAIApiKey() || isCodexCliAvailable()
   if (provider === 'local') return !!getLocalEndpoint()
-  return !!getAnthropicApiKey() || !!getOpenAIApiKey() || !!getLocalEndpoint() || isClaudeCliAvailable() || isCodexCliAvailable()
+  return !!getAnthropicApiKey() || !!getOpenAIApiKey() || !!getLocalEndpoint()
+    || isClaudeCliAvailable() || isCodexCliAvailable() || isHermesCliAvailable()
 }
 
 /**
@@ -1130,7 +1149,86 @@ async function callLocalDirectly(task: DispatchableTask, prompt: string, model: 
   return callOpenAICompatible(task, prompt, endpoint, getLocalApiKey(), stripProviderPrefix(model), 'local')
 }
 
+/**
+ * Dispatch via the Hermes Agent one-shot CLI (`hermes -z`), which prints only
+ * the final response text. Uses the operator's configured hermes provider/model.
+ *
+ * ponytail: runs hermes's default profile/config — per-agent hermes model or
+ * profile selection is not wired through. Add `--profile <name>` / `-m <model>`
+ * here if MC-created hermes profiles need to diverge from the default.
+ */
+async function callHermesViaCli(task: DispatchableTask, prompt: string): Promise<AgentResponseParsed> {
+  const soul = getAgentSoulContent(task)
+  const fullPrompt = soul ? `${soul}\n\n---\n\n${prompt}` : prompt
+  logger.info({ taskId: task.id, agent: task.agent_name }, 'Dispatching task via Hermes CLI')
+
+  return await new Promise<AgentResponseParsed>((resolve, reject) => {
+    const proc = spawn('hermes', ['-z', fullPrompt], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env },
+    })
+    let stdout = ''
+    let stderr = ''
+    const timeoutMs = 300_000
+    const timer = setTimeout(() => {
+      proc.kill('SIGTERM')
+      reject(new Error(`Hermes CLI timed out after ${timeoutMs / 1000}s`))
+    }, timeoutMs)
+
+    proc.stdout.on('data', (d) => { stdout += d.toString() })
+    proc.stderr.on('data', (d) => { stderr += d.toString() })
+    proc.on('error', (err) => { clearTimeout(timer); reject(err) })
+    proc.on('close', (code) => {
+      clearTimeout(timer)
+      const text = stdout.trim() || null
+      if (code !== 0 && !text) {
+        return reject(new Error(`hermes CLI exited ${code}: ${(stderr || stdout).slice(0, 500)}`))
+      }
+      resolve({ text, sessionId: null })
+    })
+  })
+}
+
+/**
+ * Decide which dispatch route an agent's declared runtime maps to.
+ * Pure so it can be unit-tested without spawning a CLI.
+ *
+ * - hermes  → 'hermes' when the hermes CLI is installed, else fall back to
+ *             model-based routing (so a hermes agent still runs somewhere).
+ * - claude  → 'claude' (CLI or Anthropic API resolved downstream).
+ * - codex   → 'codex'  (CLI or OpenAI API resolved downstream).
+ * - anything else (openclaw/custom/legacy/unset) → 'model' (route by model id).
+ */
+export function pickRuntimeRoute(
+  runtimeType: string | null | undefined,
+  avail: { hermes: boolean },
+): 'hermes' | 'claude' | 'codex' | 'model' {
+  switch ((runtimeType || '').toLowerCase()) {
+    case 'hermes': return avail.hermes ? 'hermes' : 'model'
+    case 'claude': return 'claude'
+    case 'codex': return 'codex'
+    default: return 'model'
+  }
+}
+
 async function callDirectly(task: DispatchableTask, prompt: string): Promise<AgentResponseParsed> {
+  // Honor the agent's declared runtime first — this is what the create-agent
+  // Runtime picker sets, so "delegate to claude/codex/hermes" routes to the
+  // runtime the operator chose regardless of the model tier heuristic.
+  const route = pickRuntimeRoute(task.runtime_type, { hermes: isHermesCliAvailable() })
+  if (route === 'hermes') {
+    return callHermesViaCli(task, prompt)
+  }
+  if (route === 'claude') {
+    if (isClaudeCliAvailable()) return callClaudeViaCli(task, prompt, stripProviderPrefix(classifyDirectModel(task)))
+    return callClaudeDirectly(task, prompt)
+  }
+  if (route === 'codex') {
+    if (isCodexCliAvailable()) return callCodexViaCli(task, prompt, '')
+    return callOpenAIDirectly(task, prompt, classifyDirectModel(task))
+  }
+
+  // No explicit runtime (openclaw/custom/legacy agents): route by model.
   const model = classifyDirectModel(task)
   const provider = pickProvider(model)
   if (provider === 'openai') return callOpenAIDirectly(task, prompt, model)
@@ -1493,6 +1591,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
 
   const tasks = db.prepare(`
     SELECT t.*, a.name as agent_name, a.id as agent_id, a.config as agent_config,
+           a.runtime_type as runtime_type,
            p.ticket_prefix, t.project_ticket_no
     FROM tasks t
     JOIN agents a ON a.name = t.assigned_to AND a.workspace_id = t.workspace_id
