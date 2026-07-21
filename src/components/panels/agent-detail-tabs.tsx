@@ -874,6 +874,9 @@ export function CreateAgentModal({
     runtime_type: 'hermes' as 'hermes' | 'claude' | 'codex' | 'openclaw',
     // Per-agent credentials: custom CLAUDE_CONFIG_DIR / CODEX_HOME. Empty = global.
     dispatchConfigDir: '',
+    // Credential rotation: try accounts in order, roll over on error/usage-limit.
+    credentialRotation: false,
+    credentialDirs: '', // one path per line (rotation on)
     // OpenClaw-only steps default off — they require a running gateway and the
     // openclaw CLI, and error out otherwise. Auto-enabled below for openclaw.
     write_to_gateway: false,
@@ -975,9 +978,19 @@ export function CreateAgentModal({
             session_key: formData.session_key || undefined,
             template: selectedTemplate || undefined,
             runtime_type: formData.runtime_type,
-            ...(formData.dispatchConfigDir.trim()
-              ? { config: { dispatchConfigDir: formData.dispatchConfigDir.trim() } }
-              : {}),
+            ...(() => {
+              const isCli = formData.runtime_type === 'claude' || formData.runtime_type === 'codex'
+              if (!isCli) return {}
+              if (formData.credentialRotation) {
+                const dirs = formData.credentialDirs.split('\n').map(s => s.trim()).filter(Boolean)
+                if (dirs.length > 0) return { config: { credentialRotation: true, credentialDirs: dirs } }
+                return {}
+              }
+              if (formData.dispatchConfigDir.trim()) {
+                return { config: { dispatchConfigDir: formData.dispatchConfigDir.trim() } }
+              }
+              return {}
+            })(),
             write_to_gateway: formData.write_to_gateway,
             provision_openclaw_workspace: formData.provision_openclaw_workspace,
             gateway_config: {
@@ -1189,22 +1202,51 @@ export function CreateAgentModal({
               </div>
 
               {(formData.runtime_type === 'claude' || formData.runtime_type === 'codex') && (
-                <div>
-                  <label className="block text-sm text-muted-foreground mb-1">
-                    Credentials directory <span className="text-muted-foreground/60">(optional)</span>
+                <div className="space-y-2 rounded-lg border border-border/40 bg-surface-1/40 p-3">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={formData.credentialRotation}
+                      onChange={(e) => setFormData(prev => ({ ...prev, credentialRotation: e.target.checked }))}
+                      className="w-4 h-4 rounded border-border"
+                    />
+                    <span className="text-sm text-foreground">Credential rotation (failover across accounts)</span>
                   </label>
-                  <input
-                    type="text"
-                    value={formData.dispatchConfigDir}
-                    onChange={(e) => setFormData(prev => ({ ...prev, dispatchConfigDir: e.target.value }))}
-                    className="w-full bg-surface-1 text-foreground border border-border rounded-md px-3 py-2 focus:outline-hidden focus:ring-1 focus:ring-primary/50 font-mono text-sm"
-                    placeholder={formData.runtime_type === 'claude' ? '/app/.data/creds/claude-work' : '/app/.data/creds/codex-work'}
-                  />
-                  <p className="text-[11px] text-muted-foreground/60 mt-1">
-                    {formData.runtime_type === 'claude'
-                      ? 'Sets CLAUDE_CONFIG_DIR for this agent (own login + settings.json). Leave empty to use the global ~/.claude.'
-                      : 'Sets CODEX_HOME for this agent (own auth.json + config.toml). Leave empty to use the global ~/.codex.'}
-                  </p>
+
+                  {!formData.credentialRotation ? (
+                    <div>
+                      <label className="block text-sm text-muted-foreground mb-1">
+                        Credentials directory <span className="text-muted-foreground/60">(optional)</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={formData.dispatchConfigDir}
+                        onChange={(e) => setFormData(prev => ({ ...prev, dispatchConfigDir: e.target.value }))}
+                        className="w-full bg-surface-1 text-foreground border border-border rounded-md px-3 py-2 focus:outline-hidden focus:ring-1 focus:ring-primary/50 font-mono text-sm"
+                        placeholder={formData.runtime_type === 'claude' ? '/app/.data/creds/claude-work' : '/app/.data/creds/codex-work'}
+                      />
+                      <p className="text-[11px] text-muted-foreground/60 mt-1">
+                        {formData.runtime_type === 'claude'
+                          ? 'Sets CLAUDE_CONFIG_DIR (own login + settings.json). Empty = global ~/.claude.'
+                          : 'Sets CODEX_HOME (own auth.json + config.toml). Empty = global ~/.codex.'}
+                      </p>
+                    </div>
+                  ) : (
+                    <div>
+                      <label className="block text-sm text-muted-foreground mb-1">Account directories — one per line, tried in order</label>
+                      <textarea
+                        value={formData.credentialDirs}
+                        onChange={(e) => setFormData(prev => ({ ...prev, credentialDirs: e.target.value }))}
+                        rows={4}
+                        className="w-full bg-surface-1 text-foreground border border-border rounded-md px-3 py-2 focus:outline-hidden focus:ring-1 focus:ring-primary/50 font-mono text-sm"
+                        placeholder={`/app/.data/creds/acct-1\n/app/.data/creds/acct-2\n/app/.data/creds/acct-3`}
+                      />
+                      <p className="text-[11px] text-muted-foreground/60 mt-1">
+                        Dispatch tries account 1; on error or usage limit it rolls over to 2, 3, … Each dir holds its own
+                        {formData.runtime_type === 'claude' ? ' ~/.claude login.' : ' ~/.codex login.'}
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
 

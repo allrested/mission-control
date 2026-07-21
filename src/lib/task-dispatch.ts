@@ -261,6 +261,86 @@ export function resolveDispatchConfigDir(
 }
 
 /**
+ * Ordered list of config-dir candidates a claude/codex agent will try.
+ * Pure (validator injected) so it is unit-testable without the filesystem.
+ *
+ * - rotation ON with a non-empty validated pool → the pool, in order. Dispatch
+ *   tries account 1, rolls to 2, 3, … on error/usage-limit (failover).
+ * - rotation OFF (or empty pool) → a single-element list: the validated
+ *   dispatchConfigDir, or `null` (= no env override → global settings.json).
+ *
+ * `null` in the returned list always means "use the global config".
+ */
+export function resolveConfigDirCandidates(
+  opts: { rotation: boolean; credentialDirs: unknown; dispatchConfigDir: unknown },
+  validate: (dir: unknown) => string | null,
+): Array<string | null> {
+  if (opts.rotation && Array.isArray(opts.credentialDirs)) {
+    const pool = opts.credentialDirs.map(validate).filter((d): d is string => !!d)
+    if (pool.length > 0) return pool
+  }
+  // Single account (rotation off, or nothing valid in the pool).
+  return [validate(opts.dispatchConfigDir)]
+}
+
+/** Read rotation config off a task and resolve its ordered dir candidates. */
+function getCredentialCandidates(task: Pick<DispatchableTask, 'id' | 'agent_config' | 'metadata'>): Array<string | null> {
+  let cfg: Record<string, any> = {}
+  if (task.agent_config) {
+    try {
+      const parsed = JSON.parse(task.agent_config)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) cfg = parsed
+    } catch { /* ignore */ }
+  }
+  const meta = safeParseMetadata(task.metadata)
+  const pick = (camel: string, snake: string): unknown =>
+    meta[camel] !== undefined ? meta[camel]
+      : meta[snake] !== undefined ? meta[snake]
+        : cfg[camel]
+
+  return resolveConfigDirCandidates(
+    {
+      rotation: pick('credentialRotation', 'credential_rotation') === true,
+      credentialDirs: pick('credentialDirs', 'credential_dirs'),
+      dispatchConfigDir: pick('dispatchConfigDir', 'dispatch_config_dir'),
+    },
+    (dir) => resolveDispatchConfigDir(dir, task.id),
+  )
+}
+
+/**
+ * Run a dispatch across an ordered list of credential dirs, rolling over to the
+ * next account when one errors (usage limit, auth failure, any thrown error).
+ * Returns the first success; throws the last error if every account fails.
+ */
+async function runWithCredentialRotation(
+  task: Pick<DispatchableTask, 'id' | 'agent_name'>,
+  candidates: Array<string | null>,
+  run: (configDir: string | null) => Promise<AgentResponseParsed>,
+): Promise<AgentResponseParsed> {
+  let lastErr: unknown
+  for (let i = 0; i < candidates.length; i++) {
+    try {
+      const res = await run(candidates[i])
+      if (i > 0) {
+        logger.info({ taskId: task.id, agent: task.agent_name, account: i + 1, of: candidates.length },
+          'Credential rollover succeeded')
+      }
+      return res
+    } catch (err: any) {
+      lastErr = err
+      if (candidates.length > 1) {
+        logger.warn(
+          { taskId: task.id, agent: task.agent_name, account: i + 1, of: candidates.length, err: err?.message },
+          i + 1 < candidates.length ? 'Credential account failed — rolling over to next' : 'Credential account failed — no accounts left',
+        )
+      }
+    }
+  }
+  throw lastErr
+}
+
+/**
  * Resolve the opt-in CLI sandbox options for a task: agent config first,
  * per-field override from tasks.metadata. All fields validated; anything
  * invalid degrades to "flag not passed" (today's behavior).
@@ -975,9 +1055,13 @@ async function callClaudeViaCli(
   task: DispatchableTask,
   prompt: string,
   model: string,
+  configDir?: string | null,
 ): Promise<AgentResponseParsed> {
   const soul = getAgentSoulContent(task)
   const sandbox = resolveCliSandboxOptions(task)
+  // Explicit configDir (incl. null) from rotation wins; otherwise the single
+  // dispatchConfigDir resolved in sandbox options (backward compatible).
+  const effectiveConfigDir = configDir === undefined ? sandbox.configDir : configDir
   const args = ['--print', '--output-format', 'json', '--model', model]
   if (sandbox.allowedTools) args.push('--allowedTools', sandbox.allowedTools.join(','))
   if (sandbox.maxBudgetUsd !== null) args.push('--max-budget-usd', String(sandbox.maxBudgetUsd))
@@ -1004,7 +1088,7 @@ async function callClaudeViaCli(
         // concurrently could still race on OAuth token refresh in one dir —
         // give that agent's dir a settings.json apiKeyHelper (or its own API
         // key login) if you push it into parallel dispatch.
-        ...(sandbox.configDir ? { CLAUDE_CONFIG_DIR: sandbox.configDir } : {}),
+        ...(effectiveConfigDir ? { CLAUDE_CONFIG_DIR: effectiveConfigDir } : {}),
       },
       ...(sandbox.cwd ? { cwd: sandbox.cwd } : {}),
     })
@@ -1129,6 +1213,7 @@ async function callCodexViaCli(
   task: DispatchableTask,
   prompt: string,
   model: string,
+  configDir?: string | null,
 ): Promise<AgentResponseParsed> {
   const os = require('node:os')
   const path = require('node:path')
@@ -1147,7 +1232,11 @@ async function callCodexViaCli(
 
   // Workspace-scoped cwd only (issue #720) — codex's own --sandbox flag
   // handling above stays untouched.
-  const { cwd: dispatchCwd, configDir } = resolveCliSandboxOptions(task)
+  const sandbox = resolveCliSandboxOptions(task)
+  const dispatchCwd = sandbox.cwd
+  // Explicit configDir (incl. null) from rotation wins; else the single
+  // dispatchConfigDir from sandbox options (backward compatible).
+  const effectiveConfigDir = configDir === undefined ? sandbox.configDir : configDir
   logger.info(
     { taskId: task.id, model, agent: task.agent_name, ...(dispatchCwd ? { sandbox: { cwd: dispatchCwd } } : {}) },
     'Dispatching task via Codex CLI',
@@ -1159,7 +1248,7 @@ async function callCodexViaCli(
       env: {
         ...process.env,
         // Per-agent credentials/config: relocate the whole ~/.codex dir.
-        ...(configDir ? { CODEX_HOME: configDir } : {}),
+        ...(effectiveConfigDir ? { CODEX_HOME: effectiveConfigDir } : {}),
       },
       ...(dispatchCwd ? { cwd: dispatchCwd } : {}),
     })
@@ -1267,12 +1356,20 @@ async function callDirectly(task: DispatchableTask, prompt: string): Promise<Age
     return callHermesViaCli(task, prompt)
   }
   if (route === 'claude') {
-    if (isClaudeCliAvailable()) return callClaudeViaCli(task, prompt, stripProviderPrefix(classifyDirectModel(task)))
-    return callClaudeDirectly(task, prompt)
+    // Roll over across the agent's credential accounts on error/usage-limit.
+    const candidates = getCredentialCandidates(task)
+    const claudeModel = stripProviderPrefix(classifyDirectModel(task))
+    return runWithCredentialRotation(task, candidates, (dir) =>
+      isClaudeCliAvailable()
+        ? callClaudeViaCli(task, prompt, claudeModel, dir)
+        : callClaudeDirectly(task, prompt))
   }
   if (route === 'codex') {
-    if (isCodexCliAvailable()) return callCodexViaCli(task, prompt, '')
-    return callOpenAIDirectly(task, prompt, classifyDirectModel(task))
+    const candidates = getCredentialCandidates(task)
+    return runWithCredentialRotation(task, candidates, (dir) =>
+      isCodexCliAvailable()
+        ? callCodexViaCli(task, prompt, '', dir)
+        : callOpenAIDirectly(task, prompt, classifyDirectModel(task)))
   }
 
   // No explicit runtime (openclaw/custom/legacy agents): route by model.
