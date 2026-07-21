@@ -1535,6 +1535,15 @@ const migrations: Migration[] = [
         CREATE INDEX idx_agents_source ON agents(source);
       `)
     }
+  },
+  {
+    id: '055_agent_rate_limited_until',
+    up(db: Database.Database) {
+      // Cross-agent usage-limit failover: unix ts (seconds) until which this
+      // agent is considered rate-limited and skipped as a failover target.
+      // NULL/past = available.
+      db.exec(`ALTER TABLE agents ADD COLUMN rate_limited_until INTEGER DEFAULT NULL`)
+    }
   }
 ]
 

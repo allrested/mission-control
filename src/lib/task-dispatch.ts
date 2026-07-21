@@ -372,7 +372,7 @@ export function resolveCliSandboxOptions(
   }
 }
 
-function buildTaskPrompt(task: DispatchableTask, rejectionFeedback?: string | null): string {
+function buildTaskPrompt(task: DispatchableTask, rejectionFeedback?: string | null, priorProgress?: string | null): string {
   const ticket = task.ticket_prefix && task.project_ticket_no
     ? `${task.ticket_prefix}-${String(task.project_ticket_no).padStart(3, '0')}`
     : `TASK-${task.id}`
@@ -394,6 +394,16 @@ function buildTaskPrompt(task: DispatchableTask, rejectionFeedback?: string | nu
 
   if (rejectionFeedback) {
     lines.push('', '## Previous Review Feedback', rejectionFeedback, '', 'Please address this feedback in your response.')
+  }
+
+  if (priorProgress) {
+    lines.push(
+      '',
+      '## Prior progress (previous account hit a usage limit)',
+      'Another agent started this task but its account was rate-limited before finishing. Continue from where it left off — do not restart from scratch:',
+      '',
+      priorProgress,
+    )
   }
 
   lines.push('', 'Complete this task and provide your response. Be concise and actionable.')
@@ -1106,7 +1116,10 @@ async function callClaudeViaCli(
     proc.on('close', (code) => {
       clearTimeout(timer)
       if (code !== 0) {
-        return reject(new Error(`claude CLI exited ${code}: ${stderr.slice(0, 500) || stdout.slice(0, 500)}`))
+        const e = new Error(`claude CLI exited ${code}: ${stderr.slice(0, 500) || stdout.slice(0, 500)}`)
+        // Carry any partial output so a usage-limit failover can continue it.
+        ;(e as any).partialOutput = stdout
+        return reject(e)
       }
       try {
         const parsed = JSON.parse(stdout)
@@ -1268,8 +1281,19 @@ async function callCodexViaCli(
       let text: string | null = null
       try { text = (readFileSync(outPath, 'utf8') as string).trim() || null } catch { /* no output file written */ }
       try { rmSync(outPath, { force: true }) } catch { /* ignore */ }
+      // A usage limit can exit non-zero *with* partial output; treat it as a
+      // failure (so failover fires) rather than a completed task, and carry
+      // the partial output forward.
+      const combined = stderr || stdout
+      if (isUsageLimitError(combined)) {
+        const e = new Error(`codex usage limit: ${combined.slice(0, 300)}`)
+        ;(e as any).partialOutput = text || stdout
+        return reject(e)
+      }
       if (code !== 0 && !text) {
-        return reject(new Error(`codex CLI exited ${code}: ${(stderr || stdout).slice(0, 500)}`))
+        const e = new Error(`codex CLI exited ${code}: ${(stderr || stdout).slice(0, 500)}`)
+        ;(e as any).partialOutput = stdout
+        return reject(e)
       }
       resolve({ text: text || stdout.trim() || null, sessionId: null })
     })
@@ -1730,6 +1754,56 @@ export async function requeueStaleTasks(): Promise<{ ok: boolean; message: strin
   }
 }
 
+/**
+ * Heuristic: does a dispatch error look like a provider usage / rate limit?
+ * ponytail: matches common claude/codex wording; widen the pattern if a real
+ * limit message slips through and fails the task instead of failing over.
+ */
+export function isUsageLimitError(message: string | null | undefined): boolean {
+  if (!message) return false
+  return /rate[\s_-]?limit|usage limit|limit reached|quota|too many requests|\b429\b|\b529\b|overloaded|insufficient[_ ]?quota|exceeded your/i.test(message)
+}
+
+/** Cooldown (minutes) a rate-limited agent is skipped as a failover target. */
+function ratelimitCooldownMinutes(): number {
+  try {
+    const row = getDatabase().prepare("SELECT value FROM settings WHERE key = 'general.agent_ratelimit_cooldown_minutes'").get() as { value: string } | undefined
+    const n = row ? parseInt(row.value) : NaN
+    return Number.isFinite(n) && n > 0 ? n : 60
+  } catch { return 60 }
+}
+
+/** Is credential rotation / cross-agent failover enabled on this agent? */
+function failoverEnabled(agentConfig: string | null): boolean {
+  if (!agentConfig) return false
+  try { return JSON.parse(agentConfig)?.credentialRotation === true } catch { return false }
+}
+
+/**
+ * Pick another agent of the same runtime, in the same workspace, that has
+ * failover enabled and is not currently rate-limited, to take over a task.
+ */
+function pickFailoverAgent(
+  runtimeType: string | null | undefined,
+  workspaceId: number,
+  excludeAgentId: number,
+  now: number,
+): { id: number; name: string } | null {
+  if (!runtimeType) return null
+  try {
+    const rows = getDatabase().prepare(`
+      SELECT id, name, config FROM agents
+      WHERE workspace_id = ? AND runtime_type = ? AND id != ?
+        AND (rate_limited_until IS NULL OR rate_limited_until < ?)
+      ORDER BY id ASC
+    `).all(workspaceId, runtimeType, excludeAgentId, now) as Array<{ id: number; name: string; config: string | null }>
+    for (const r of rows) {
+      if (failoverEnabled(r.config)) return { id: r.id, name: r.name }
+    }
+    return null
+  } catch { return null }
+}
+
 export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: string }> {
   const db = getDatabase()
 
@@ -1805,9 +1879,8 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
       `).get(task.id, task.workspace_id) as { content: string } | undefined
       const rejectionFeedback = rejectionRow?.content?.replace(/^Quality Review Rejected:\n?/, '') || null
 
-      const prompt = buildTaskPrompt(task, rejectionFeedback)
-
-      // Check if task has a target session specified in metadata
+      // Read task metadata up front — carries target_session and, after a
+      // usage-limit failover, the partial progress from the previous account.
       const taskMeta = (() => {
         try {
           const row = db.prepare('SELECT metadata FROM tasks WHERE id = ? AND workspace_id = ?')
@@ -1815,6 +1888,13 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
           return row?.metadata ? JSON.parse(row.metadata) : {}
         } catch { return {} }
       })()
+      const failoverContext = typeof taskMeta?.failover_context === 'string' && taskMeta.failover_context.trim()
+        ? taskMeta.failover_context.trim()
+        : null
+
+      const prompt = buildTaskPrompt(task, rejectionFeedback, failoverContext)
+
+      // Check if task has a target session specified in metadata
       const targetSession: string | null = typeof taskMeta?.target_session === 'string' && taskMeta.target_session
         ? taskMeta.target_session
         : null
@@ -2024,11 +2104,62 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
         task.workspace_id
       )
 
+      // Successful run → clear any stale rate-limit cooldown on this agent.
+      db.prepare('UPDATE agents SET rate_limited_until = NULL WHERE id = ? AND workspace_id = ? AND rate_limited_until IS NOT NULL')
+        .run(task.agent_id, task.workspace_id)
+
       results.push({ id: task.id, success: true })
       logger.info({ taskId: task.id, agent: task.agent_name }, 'Task dispatched and completed')
     } catch (err: any) {
       const errorMsg = err.message || 'Unknown error'
       logger.error({ taskId: task.id, agent: task.agent_name, err }, 'Task dispatch failed')
+
+      // Cross-agent usage-limit failover: if this agent hit a usage limit and
+      // has rotation enabled, cool it down and hand the task to another
+      // same-runtime agent that's still available — carrying partial progress
+      // so the next account continues rather than restarting. Does NOT count
+      // toward dispatch_attempts (a rate limit isn't the task's fault).
+      if (isUsageLimitError(errorMsg) && failoverEnabled(task.agent_config)) {
+        const fnow = Math.floor(Date.now() / 1000)
+        db.prepare('UPDATE agents SET rate_limited_until = ?, updated_at = ? WHERE id = ? AND workspace_id = ?')
+          .run(fnow + ratelimitCooldownMinutes() * 60, fnow, task.agent_id, task.workspace_id)
+
+        const next = pickFailoverAgent(task.runtime_type, task.workspace_id, task.agent_id, fnow)
+        if (next) {
+          const partial = typeof err.partialOutput === 'string' && err.partialOutput.trim()
+            ? err.partialOutput.trim().slice(0, 8000)
+            : null
+          const meta = (() => {
+            try {
+              const row = db.prepare('SELECT metadata FROM tasks WHERE id = ? AND workspace_id = ?')
+                .get(task.id, task.workspace_id) as { metadata: string } | undefined
+              return row?.metadata ? JSON.parse(row.metadata) : {}
+            } catch { return {} }
+          })()
+          meta.failover_from = task.agent_name
+          if (partial) meta.failover_context = partial; else delete meta.failover_context
+
+          db.prepare("UPDATE tasks SET status = 'assigned', assigned_to = ?, metadata = ?, updated_at = ? WHERE id = ? AND workspace_id = ?")
+            .run(next.name, JSON.stringify(meta), fnow, task.id, task.workspace_id)
+          db.prepare(`INSERT INTO comments (task_id, author, content, created_at, workspace_id) VALUES (?, 'scheduler', ?, ?, ?)`)
+            .run(task.id, `Agent "${task.agent_name}" hit a usage limit — failing over to "${next.name}".${partial ? ' Partial progress carried forward.' : ''}`, fnow, task.workspace_id)
+
+          eventBus.broadcast('task.status_changed', {
+            id: task.id, status: 'assigned', previous_status: 'in_progress',
+            reason: 'usage_limit_failover', assigned_to: next.name, workspace_id: task.workspace_id,
+          })
+          db_helpers.logActivity('task_failover', 'task', task.id, 'scheduler',
+            `Failed over "${task.title}" from ${task.agent_name} to ${next.name} (usage limit)`,
+            { from: task.agent_name, to: next.name, carried_context: !!partial }, task.workspace_id)
+
+          logger.warn({ taskId: task.id, from: task.agent_name, to: next.name }, 'Usage-limit failover to alternate agent')
+          results.push({ id: task.id, success: true })
+          continue
+        }
+        // No available same-runtime agent — fall through to normal failure
+        // handling (all accounts exhausted → bounded retries → escalate).
+        logger.warn({ taskId: task.id, agent: task.agent_name }, 'Usage limit hit but no failover agent available')
+      }
 
       // Increment dispatch_attempts and decide next status
       const currentAttempts = (db.prepare('SELECT dispatch_attempts FROM tasks WHERE id = ? AND workspace_id = ?')
