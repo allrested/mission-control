@@ -872,6 +872,8 @@ export function CreateAgentModal({
     dockerNetwork: 'none' as 'none' | 'bridge',
     session_key: '',
     runtime_type: 'hermes' as 'hermes' | 'claude' | 'codex' | 'openclaw',
+    // Per-agent credentials: custom CLAUDE_CONFIG_DIR / CODEX_HOME. Empty = global.
+    dispatchConfigDir: '',
     // OpenClaw-only steps default off — they require a running gateway and the
     // openclaw CLI, and error out otherwise. Auto-enabled below for openclaw.
     write_to_gateway: false,
@@ -973,6 +975,9 @@ export function CreateAgentModal({
             session_key: formData.session_key || undefined,
             template: selectedTemplate || undefined,
             runtime_type: formData.runtime_type,
+            ...(formData.dispatchConfigDir.trim()
+              ? { config: { dispatchConfigDir: formData.dispatchConfigDir.trim() } }
+              : {}),
             write_to_gateway: formData.write_to_gateway,
             provision_openclaw_workspace: formData.provision_openclaw_workspace,
             gateway_config: {
@@ -1182,6 +1187,26 @@ export function CreateAgentModal({
                   <option value="openclaw">OpenClaw (gateway)</option>
                 </select>
               </div>
+
+              {(formData.runtime_type === 'claude' || formData.runtime_type === 'codex') && (
+                <div>
+                  <label className="block text-sm text-muted-foreground mb-1">
+                    Credentials directory <span className="text-muted-foreground/60">(optional)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={formData.dispatchConfigDir}
+                    onChange={(e) => setFormData(prev => ({ ...prev, dispatchConfigDir: e.target.value }))}
+                    className="w-full bg-surface-1 text-foreground border border-border rounded-md px-3 py-2 focus:outline-hidden focus:ring-1 focus:ring-primary/50 font-mono text-sm"
+                    placeholder={formData.runtime_type === 'claude' ? '/app/.data/creds/claude-work' : '/app/.data/creds/codex-work'}
+                  />
+                  <p className="text-[11px] text-muted-foreground/60 mt-1">
+                    {formData.runtime_type === 'claude'
+                      ? 'Sets CLAUDE_CONFIG_DIR for this agent (own login + settings.json). Leave empty to use the global ~/.claude.'
+                      : 'Sets CODEX_HOME for this agent (own auth.json + config.toml). Leave empty to use the global ~/.codex.'}
+                  </p>
+                </div>
+              )}
 
               <div>
                 <label className="block text-sm text-muted-foreground mb-1">{t('modelTier')}</label>

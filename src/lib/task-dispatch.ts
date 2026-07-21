@@ -159,6 +159,8 @@ export interface CliDispatchSandboxOptions {
   allowedTools: string[] | null
   maxBudgetUsd: number | null
   cwd: string | null
+  /** Per-agent config/credentials dir → CLAUDE_CONFIG_DIR / CODEX_HOME. */
+  configDir: string | null
 }
 
 /**
@@ -229,6 +231,36 @@ export function resolveCliDispatchCwd(input: unknown, workspaceRoot: string, tas
 }
 
 /**
+ * Resolve a per-agent CLI config/credentials directory. When set, claude and
+ * codex dispatch run against this dir instead of the global one, giving each
+ * agent its own logged-in account / settings.json:
+ *   - claude → CLAUDE_CONFIG_DIR (relocates ~/.claude: settings + credentials)
+ *   - codex  → CODEX_HOME        (relocates ~/.codex: config.toml + auth.json)
+ *
+ * Source: agent config `dispatchConfigDir` (per-task override
+ * `dispatch_config_dir`). Operator-supplied (admin-only create), so validation
+ * is a light existence + directory check; a missing/invalid path degrades to
+ * the global default rather than failing the task.
+ */
+export function resolveDispatchConfigDir(
+  input: unknown,
+  taskId?: number,
+): string | null {
+  if (typeof input !== 'string' || !input.trim()) return null
+  const dir = input.trim()
+  try {
+    if (!existsSync(dir) || !statSync(dir).isDirectory()) {
+      logger.warn({ taskId, dir }, 'Ignoring dispatch config dir: not an existing directory')
+      return null
+    }
+    return dir
+  } catch {
+    logger.warn({ taskId, dir }, 'Ignoring dispatch config dir: not accessible')
+    return null
+  }
+}
+
+/**
  * Resolve the opt-in CLI sandbox options for a task: agent config first,
  * per-field override from tasks.metadata. All fields validated; anything
  * invalid degrades to "flag not passed" (today's behavior).
@@ -256,6 +288,7 @@ export function resolveCliSandboxOptions(
     allowedTools: filterCliAllowedTools(pick('dispatchAllowedTools', 'dispatch_allowed_tools'), task.id),
     maxBudgetUsd: clampCliMaxBudgetUsd(pick('dispatchMaxBudgetUsd', 'dispatch_max_budget_usd'), task.id),
     cwd: resolveCliDispatchCwd(pick('dispatchCwd', 'dispatch_cwd'), workspaceRoot, task.id),
+    configDir: resolveDispatchConfigDir(pick('dispatchConfigDir', 'dispatch_config_dir'), task.id),
   }
 }
 
@@ -962,7 +995,17 @@ async function callClaudeViaCli(
   return await new Promise<AgentResponseParsed>((resolve, reject) => {
     const proc = spawn('claude', args, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, CI: '1' },
+      env: {
+        ...process.env,
+        CI: '1',
+        // Per-agent credentials/settings: relocate the whole ~/.claude dir
+        // (settings.json + .credentials.json). ponytail: distinct agents use
+        // distinct dirs so they never share; the same claude agent dispatched
+        // concurrently could still race on OAuth token refresh in one dir —
+        // give that agent's dir a settings.json apiKeyHelper (or its own API
+        // key login) if you push it into parallel dispatch.
+        ...(sandbox.configDir ? { CLAUDE_CONFIG_DIR: sandbox.configDir } : {}),
+      },
       ...(sandbox.cwd ? { cwd: sandbox.cwd } : {}),
     })
     let stdout = ''
@@ -1104,7 +1147,7 @@ async function callCodexViaCli(
 
   // Workspace-scoped cwd only (issue #720) — codex's own --sandbox flag
   // handling above stays untouched.
-  const dispatchCwd = resolveCliSandboxOptions(task).cwd
+  const { cwd: dispatchCwd, configDir } = resolveCliSandboxOptions(task)
   logger.info(
     { taskId: task.id, model, agent: task.agent_name, ...(dispatchCwd ? { sandbox: { cwd: dispatchCwd } } : {}) },
     'Dispatching task via Codex CLI',
@@ -1113,7 +1156,11 @@ async function callCodexViaCli(
   return await new Promise<AgentResponseParsed>((resolve, reject) => {
     const proc = spawn('codex', args, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: {
+        ...process.env,
+        // Per-agent credentials/config: relocate the whole ~/.codex dir.
+        ...(configDir ? { CODEX_HOME: configDir } : {}),
+      },
       ...(dispatchCwd ? { cwd: dispatchCwd } : {}),
     })
     let stdout = ''
