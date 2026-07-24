@@ -652,7 +652,7 @@ async function installOpenClawLocal(job: InstallJob): Promise<void> {
   try {
     // Download, review, then execute from secure temp dir
     const reviewed = await downloadAndReviewScript(
-      'https://get.openclaw.dev',
+      'https://openclaw.ai/install.sh',
       process.env.MC_OPENCLAW_INSTALLER_SHA256 || '',
       job,
       env,
