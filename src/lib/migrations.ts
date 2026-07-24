@@ -1544,6 +1544,23 @@ const migrations: Migration[] = [
       // NULL/past = available.
       db.exec(`ALTER TABLE agents ADD COLUMN rate_limited_until INTEGER DEFAULT NULL`)
     }
+  },
+  {
+    id: '056_user_ssh_keys',
+    up(db: Database.Database) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS user_ssh_keys (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          workspace_id INTEGER NOT NULL DEFAULT 1,
+          public_key TEXT NOT NULL,
+          label TEXT,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_ssh_keys_user ON user_ssh_keys(user_id);
+      `)
+    }
   }
 ]
 
