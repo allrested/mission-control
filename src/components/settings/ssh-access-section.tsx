@@ -10,6 +10,8 @@ export function SshAccessSection() {
   const [label, setLabel] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [ideBusy, setIdeBusy] = useState(false)
+  const [ideErr, setIdeErr] = useState<string | null>(null)
 
   const load = async () => {
     try { setKeys((await apiFetch<{ keys: Key[] }>('/api/me/ssh-keys')).keys) } catch { /* ignore */ }
@@ -29,12 +31,28 @@ export function SshAccessSection() {
     await load()
   }
 
+  const openIde = async () => {
+    setIdeBusy(true); setIdeErr(null)
+    try {
+      const { url } = await apiFetch<{ url: string }>('/api/ide/token', { method: 'POST' })
+      window.open(url, '_blank', 'noopener')
+    } catch (e: any) { setIdeErr(e?.message || 'Failed to open IDE') } finally { setIdeBusy(false) }
+  }
+
   return (
     <section className="space-y-3">
       <div>
         <h3 className="text-lg font-semibold text-foreground">SSH Access</h3>
         <p className="text-sm text-muted-foreground">Add your SSH public key to get an isolated shell on the dev server. Connect with <code>ssh &lt;your-username&gt;@&lt;host&gt; -p 2222</code>.</p>
       </div>
+      <div className="flex items-center gap-2">
+        <button onClick={openIde} disabled={ideBusy}
+          className="px-4 py-2 rounded-md bg-primary text-primary-foreground text-sm disabled:opacity-50">
+          {ideBusy ? 'Opening…' : 'Open IDE'}
+        </button>
+        <span className="text-xs text-muted-foreground">Browser VS Code on your isolated dev account.</span>
+      </div>
+      {ideErr && <p className="text-sm text-red-500">{ideErr}</p>}
       <div className="space-y-2">
         <textarea
           value={publicKey}
