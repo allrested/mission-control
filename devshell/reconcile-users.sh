@@ -12,7 +12,7 @@ while IFS= read -r row; do
   uname="$(echo "$row" | jq -r '.username')"
   role="$(echo "$row" | jq -r '.role')"
   # Sanitize to a safe Linux username.
-  luser="$(echo "$uname" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '_')"
+  luser="$(printf '%s' "$uname" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '_')"
   [ -z "$luser" ] && continue
   case "$seen" in
     *" ${luser} "*) echo "reconcile: skipping duplicate normalized username $luser ($uname)"; continue ;;
@@ -29,7 +29,9 @@ while IFS= read -r row; do
 
   # Admin → sudo; otherwise ensure not in sudo.
   if [ "$role" = "admin" ]; then usermod -aG sudo "$luser"; else gpasswd -d "$luser" sudo >/dev/null 2>&1 || true; fi
-  usermod -U "$luser" >/dev/null 2>&1 || true
+  # Pubkey-only account: "*" unlocks PAM's account-locked check without enabling
+  # password login (unlike the useradd default "!", which sshd/PAM reject as locked).
+  usermod -p '*' "$luser" >/dev/null 2>&1 || true
   usermod -s /bin/bash "$luser" >/dev/null 2>&1 || true
 
   akeys="/home/${luser}/.ssh/authorized_keys"
