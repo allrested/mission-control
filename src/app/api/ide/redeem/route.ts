@@ -2,12 +2,17 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireRole } from '@/lib/auth'
 import { redeemIdeToken } from '@/lib/ide-tokens'
 import { getDatabase } from '@/lib/db'
+import { identitySecurityMutationLimiter } from '@/lib/rate-limit'
 import { logger } from '@/lib/logger'
 
 // Called by the devshell ide-proxy with the global API key (admin scope).
 export async function POST(request: NextRequest) {
   const auth = requireRole(request, 'admin')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
+
+  const rateCheck = identitySecurityMutationLimiter(`${auth.user.tenant_id ?? 1}:${auth.user.workspace_id ?? 1}:${auth.user.id}:ide-redeem`)
+  if (rateCheck) return rateCheck
+
   let body: { token?: string }
   try { body = await request.json() } catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }) }
   if (!body || typeof body !== 'object' || typeof body.token !== 'string' || !body.token) {
