@@ -1,0 +1,7 @@
+{
+  "name": "ide-proxy",
+  "private": true,
+  "version": "1.0.0",
+  "type": "commonjs",
+  "dependencies": { "http-proxy": "^1.18.1" }
+}
