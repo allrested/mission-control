@@ -666,7 +666,7 @@ async function installOpenClawLocal(job: InstallJob): Promise<void> {
 
     let result
     try {
-      result = await runCommand('bash', [reviewed.scriptPath, '--non-interactive'], {
+      result = await runCommand('bash', [reviewed.scriptPath, '--no-prompt', '--no-onboard'], {
         timeoutMs: 300_000, env,
         onData: (chunk) => { job.output += chunk },
       })
