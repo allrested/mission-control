@@ -81,8 +81,28 @@ services:
       - PORT=${PORT:-3000}
       - NEXT_PUBLIC_GATEWAY_OPTIONAL=true
 
+  mc-devshell:
+    build: ./devshell
+    container_name: mc-devshell
+    depends_on:
+      - mission-control
+    environment:
+      - MC_URL=${MC_INTERNAL_URL:-http://mission-control:3000}
+      - MC_API_KEY=${MC_API_KEY:?set MC_API_KEY in .env for the devshell reconciler}
+      - RECONCILE_INTERVAL=${RECONCILE_INTERVAL:-30}
+    ports:
+      - "${DEVSHELL_SSH_PORT:-2222}:22"
+    volumes:
+      - mc-homes:/home
+      # Shared code — same dir the developers and agents use.
+      - ${MC_REPOS_DIR:-../repos}:/srv/repos
+    networks:
+      - mc-net
+    restart: unless-stopped
+
 volumes:
   mc-data:
+  mc-homes:
 
 networks:
   mc-net:
