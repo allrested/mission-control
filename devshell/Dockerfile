@@ -7,6 +7,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Agent CLIs on PATH for interactive use.
 RUN npm install -g @anthropic-ai/claude-code @openai/codex
 
+# Browser IDE (per-user code-server, spawned by ide-proxy)
+RUN curl -fsSL https://code-server.dev/install.sh | sh
+
 # Shared-repos group + mountpoint (setgid so new files inherit the group).
 RUN groupadd devs \
     && mkdir -p /srv/repos /var/run/sshd \
