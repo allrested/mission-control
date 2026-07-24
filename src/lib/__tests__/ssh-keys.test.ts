@@ -5,7 +5,7 @@ describe('isValidSshPublicKey', () => {
   it('accepts common OpenSSH public key types', () => {
     expect(isValidSshPublicKey('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID user@host')).toBe(true)
     expect(isValidSshPublicKey('ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB comment here')).toBe(true)
-    expect(isValidSshPublicKey('ecdsa-sha2-nistp256 AAAAE2VjZHNh')).toBe(true)
+    expect(isValidSshPublicKey('ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAI')).toBe(true)
   })
   it('rejects private keys and junk', () => {
     expect(isValidSshPublicKey('-----BEGIN OPENSSH PRIVATE KEY-----')).toBe(false)
