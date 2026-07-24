@@ -1,0 +1,9 @@
+Port 22
+PermitRootLogin no
+PasswordAuthentication no
+PubkeyAuthentication yes
+AllowGroups devs
+X11Forwarding no
+PrintMotd no
+ClientAliveInterval 120
+Subsystem sftp /usr/lib/openssh/sftp-server
