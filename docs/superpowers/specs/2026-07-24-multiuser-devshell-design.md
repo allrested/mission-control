@@ -164,6 +164,9 @@ plane. Therefore the dev environment lives in a **dedicated container**.
   loss; revisit if operators want hard cleanup.
 - **Phase-2 proxy auth:** must bind code-server to localhost and only expose via
   the MC-authenticated proxy, so instances aren't reachable unauthenticated.
+- **Phase 1 limitation: single-tenant devshell.** `listAllUsersWithKeys()` returns
+  users across all workspaces/tenants; acceptable while this deployment is a
+  single shared workspace. Multi-tenant devshell scoping is a follow-up.
 
 ## Future work
 

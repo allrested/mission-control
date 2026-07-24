@@ -39,10 +39,19 @@ export function deleteUserSshKey(id: number, userId: number): boolean {
   return getDatabase().prepare('DELETE FROM user_ssh_keys WHERE id = ? AND user_id = ?').run(id, userId).changes > 0
 }
 
-/** For the reconciler: every user + their registered public keys. */
+/**
+ * For the reconciler: every user + their registered public keys.
+ *
+ * Intentionally returns users across ALL workspaces/tenants — Phase 1 of the
+ * multi-user devshell targets a single shared workspace, so the reconciler
+ * (and its Linux-account namespace) is not workspace-scoped either. Scoping
+ * this to a workspace/tenant is a follow-up if devshell ever needs to be
+ * multi-tenant. `ORDER BY id` makes a normalized-username collision between
+ * two users resolve to the same winner (the earlier-created user) every run.
+ */
 export function listAllUsersWithKeys(): Array<{ username: string; workspace_id: number; role: string; public_keys: string[] }> {
   const db = getDatabase()
-  const users = db.prepare('SELECT id, username, workspace_id, role FROM users').all() as Array<{ id: number; username: string; workspace_id: number; role: string }>
+  const users = db.prepare('SELECT id, username, workspace_id, role FROM users ORDER BY id').all() as Array<{ id: number; username: string; workspace_id: number; role: string }>
   const keyStmt = db.prepare('SELECT public_key FROM user_ssh_keys WHERE user_id = ?')
   return users.map(u => ({
     username: u.username,

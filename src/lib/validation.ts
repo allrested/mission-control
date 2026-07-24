@@ -283,7 +283,8 @@ export const spawnAgentSchema = z.object({
 })
 
 export const createUserSchema = z.object({
-  username: z.string().min(1, 'Username is required'),
+  username: z.string().trim().toLowerCase()
+    .regex(/^[a-z][a-z0-9_-]{1,30}[a-z0-9]$/, 'Invalid username'),
   password: z.string().min(12, 'Password must be at least 12 characters'),
   display_name: z.string().optional(),
   role: z.enum(['admin', 'operator', 'viewer']).default('operator'),
