@@ -11,7 +11,12 @@ export function LocalModeBanner() {
   const t = useTranslations('localModeBanner')
   const tc = useTranslations('common')
 
-  if (!capabilitiesChecked || dashboardMode === 'full' || bannerDismissed) return null
+  // Standalone (gateway-optional) is the default deployment mode — in that mode
+  // "no gateway" is expected, not a problem, so don't nag with the banner.
+  // Set NEXT_PUBLIC_GATEWAY_OPTIONAL=false to bring it back (gateway-required).
+  const gatewayOptional = process.env.NEXT_PUBLIC_GATEWAY_OPTIONAL !== 'false'
+
+  if (!capabilitiesChecked || dashboardMode === 'full' || bannerDismissed || gatewayOptional) return null
 
   return (
     <div className="mx-4 mt-3 mb-0 flex items-center gap-3 px-4 py-2.5 rounded-lg bg-void-cyan/5 border border-void-cyan/15 text-sm">
