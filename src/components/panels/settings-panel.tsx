@@ -8,6 +8,7 @@ import { useMissionControl } from '@/store'
 import { useNavigateToPanel } from '@/lib/navigation'
 import { SecurityScanCard } from '@/components/onboarding/security-scan-card'
 import { AgentRuntimesSection } from '@/components/settings/agent-runtimes-section'
+import { SshAccessSection } from '@/components/settings/ssh-access-section'
 import { Loader } from '@/components/ui/loader'
 import { clearOnboardingDismissedThisSession, clearOnboardingReplayFromStart } from '@/lib/onboarding-session'
 import { resolveCoordinatorDeliveryTarget, type CoordinatorAgentRecord } from '@/lib/coordinator-routing'
@@ -976,6 +977,9 @@ export function SettingsPanel() {
 
       {/* Account / OAuth connection */}
       <AccountOAuthSection />
+
+      {/* SSH Access */}
+      <SshAccessSection />
 
       {/* Unsaved changes bar */}
       {hasChanges && (
