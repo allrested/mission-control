@@ -14,6 +14,9 @@ while IFS= read -r row; do
   # Sanitize to a safe Linux username.
   luser="$(echo "$uname" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '_')"
   [ -z "$luser" ] && continue
+  case "$seen" in
+    *" ${luser} "*) echo "reconcile: skipping duplicate normalized username $luser ($uname)"; continue ;;
+  esac
   seen="${seen}${luser} "
 
   if ! id "$luser" >/dev/null 2>&1; then
@@ -39,7 +42,8 @@ done < <(echo "$json" | jq -c '.[]')
 for luser in $(getent group devs | cut -d: -f4 | tr ',' ' '); do
   case "$seen" in
     *" ${luser} "*) : ;;
-    *) usermod -L "$luser" >/dev/null 2>&1 || true; usermod -s /usr/sbin/nologin "$luser" >/dev/null 2>&1 || true ;;
+    *) usermod -L "$luser" >/dev/null 2>&1 || true; usermod -s /usr/sbin/nologin "$luser" >/dev/null 2>&1 || true
+       : > "/home/$luser/.ssh/authorized_keys" 2>/dev/null || true ;;
   esac
 done
 
