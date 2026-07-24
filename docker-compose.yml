@@ -86,6 +86,9 @@ services:
     container_name: mc-devshell
     depends_on:
       - mission-control
+    # NOTE: mission-control's MC_ALLOWED_HOSTS must include the internal service name
+    # 'mission-control' so the reconciler's http://mission-control:3000 calls aren't
+    # rejected (403) by MC's production host allowlist (src/proxy.ts).
     environment:
       - MC_URL=${MC_INTERNAL_URL:-http://mission-control:3000}
       - MC_API_KEY=${MC_API_KEY:?set MC_API_KEY in .env for the devshell reconciler}
