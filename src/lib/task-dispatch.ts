@@ -1945,9 +1945,15 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
       let agentResponse: AgentResponseParsed
       const useDirectApi = !isGatewayAvailable() && isDirectDispatchAvailable()
 
-      if (useDirectApi && !targetSession) {
-        // Direct API dispatch — provider chosen by `dispatchModel` prefix
-        // (Anthropic / OpenAI / OpenAI-compatible local). No gateway needed.
+      if (useDirectApi) {
+        // Direct dispatch — provider chosen by the agent's runtime_type, else
+        // by `dispatchModel` prefix (Anthropic / OpenAI / local). No gateway.
+        // A target_session is a gateway-only concept: with no gateway there is
+        // no session to continue, so run the task rather than failing forever.
+        if (targetSession) {
+          logger.warn({ taskId: task.id, targetSession, agent: task.agent_name },
+            'No gateway reachable — ignoring target_session and dispatching directly')
+        }
         agentResponse = await callDirectly(task, prompt)
       } else if (targetSession) {
         // Dispatch to a specific existing session via chat.send
