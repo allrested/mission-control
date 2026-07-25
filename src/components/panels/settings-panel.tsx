@@ -115,6 +115,9 @@ export function SettingsPanel() {
   const [grouped, setGrouped] = useState<Record<string, Setting[]>>({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // Admin-only settings unavailable (403) — the panel still renders the
+  // per-user sections below, so this is a restriction, not a failure.
+  const [settingsRestricted, setSettingsRestricted] = useState(false)
   const [saving, setSaving] = useState(false)
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null)
 
@@ -202,7 +205,10 @@ export function SettingsPanel() {
         return
       }
       if (res.status === 403) {
-        setError('Admin access required')
+        // Admin-only settings — NOT fatal. Non-admins still need this panel for
+        // their own per-user sections (SSH Access / Open IDE, Account), so mark
+        // the admin settings restricted and render the rest.
+        setSettingsRestricted(true)
         return
       }
       if (!res.ok) {
@@ -397,7 +403,10 @@ export function SettingsPanel() {
     )
   }
 
-  const categories = categoryOrder.filter(c => c === 'security' || c === 'profiles' || (grouped[c]?.length > 0))
+  // Non-admins get no admin settings payload — render only their own sections.
+  const categories = settingsRestricted
+    ? []
+    : categoryOrder.filter(c => c === 'security' || c === 'profiles' || (grouped[c]?.length > 0))
 
   return (
     <div className="p-4 md:p-6 max-w-4xl mx-auto space-y-6">
