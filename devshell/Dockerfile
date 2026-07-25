@@ -15,6 +15,9 @@ RUN groupadd devs \
     && mkdir -p /srv/repos /var/run/sshd \
     && chgrp devs /srv/repos && chmod 2775 /srv/repos
 
+COPY ide-proxy /opt/ide-proxy
+RUN cd /opt/ide-proxy && npm install --omit=dev --no-audit --no-fund
+
 COPY sshd_config /etc/ssh/sshd_config
 COPY reconcile-users.sh /usr/local/bin/reconcile-users.sh
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh

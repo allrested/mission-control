@@ -32,6 +32,7 @@ services:
       # - NEXT_PUBLIC_GATEWAY_PORT=${NEXT_PUBLIC_GATEWAY_PORT:-18789}
       # Set to true if running without an OpenClaw gateway (standalone dashboard mode).
       # - NEXT_PUBLIC_GATEWAY_OPTIONAL=true
+      - IDE_PUBLIC_URL=${IDE_PUBLIC_URL:-}
     env_file:
       - path: .env
         required: false
@@ -93,8 +94,12 @@ services:
       - MC_URL=${MC_INTERNAL_URL:-http://mission-control:3000}
       - MC_API_KEY=${MC_API_KEY:?set MC_API_KEY in .env for the devshell reconciler}
       - RECONCILE_INTERVAL=${RECONCILE_INTERVAL:-30}
+      - IDE_PROXY_SECRET=${IDE_PROXY_SECRET:?set IDE_PROXY_SECRET in .env}
+      - IDE_IDLE_MINUTES=${IDE_IDLE_MINUTES:-30}
+      - IDE_PORT_RANGE=${IDE_PORT_RANGE:-9000-9099}
     ports:
       - "${DEVSHELL_SSH_PORT:-2222}:22"
+      - "${DEVSHELL_IDE_PORT:-8443}:8443"
     volumes:
       - mc-homes:/home
       # Shared code — same dir the developers and agents use.
