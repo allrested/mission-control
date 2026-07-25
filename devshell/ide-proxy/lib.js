@@ -27,10 +27,4 @@ function verifyCookie(value, secret, now) {
   return u ? { username: u, exp } : null
 }
 
-function pickPort(used, range) {
-  const [lo, hi] = range
-  for (let p = lo; p <= hi; p++) if (!used.has(p)) return p
-  return null
-}
-
-module.exports = { sanitizeUsername, signCookie, verifyCookie, pickPort }
+module.exports = { sanitizeUsername, signCookie, verifyCookie }

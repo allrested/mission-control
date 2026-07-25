@@ -1,30 +1,39 @@
 'use strict'
 const http = require('http')
-const crypto = require('crypto')
-const { spawn } = require('child_process')
+const net = require('net')
+const fs = require('fs')
+const { spawn, spawnSync } = require('child_process')
 const httpProxy = require('http-proxy')
-const { sanitizeUsername, signCookie, verifyCookie, pickPort } = require('./lib.js')
+const { signCookie, verifyCookie } = require('./lib.js')
 
 const PORT = Number(process.env.IDE_PROXY_PORT || 8443)
 const MC_URL = (process.env.MC_URL || 'http://mission-control:3000').replace(/\/$/, '')
 const MC_API_KEY = process.env.MC_API_KEY || ''
 const SECRET = process.env.IDE_PROXY_SECRET || ''
-const IDLE_MS = Number(process.env.IDE_IDLE_MINUTES || 30) * 60 * 1000
-const RANGE = (process.env.IDE_PORT_RANGE || '9000-9099').split('-').map(Number)
+const IDLE_MINUTES_RAW = Number(process.env.IDE_IDLE_MINUTES)
+const IDLE_MS = (Number.isFinite(IDLE_MINUTES_RAW) && IDLE_MINUTES_RAW > 0 ? IDLE_MINUTES_RAW : 30) * 60 * 1000
+const SOCK_DIR = '/run/ide'
 const COOKIE = 'mc_ide'
+const MANAGED_TTL_MS = 30_000
 
 if (!SECRET || !MC_API_KEY) { console.error('IDE_PROXY_SECRET and MC_API_KEY are required'); process.exit(1) }
 
 const proxy = httpProxy.createProxyServer({ ws: true })
 proxy.on('error', (err, _req, res) => { try { res.writeHead && res.writeHead(502); res.end('IDE upstream error') } catch {} })
 
-// username -> { port, proc, lastSeen }
+// username -> { sock, proc, lastSeen, ready, failed, liveSockets }
 const instances = new Map()
 const spawnLocks = new Map() // username -> Promise (guards concurrent first-hits)
+const managedCache = new Map() // username -> { managed, ts }
 
 function parseCookies(h) {
   const out = {}
-  for (const p of String(h || '').split(';')) { const i = p.indexOf('='); if (i > 0) out[p.slice(0, i).trim()] = decodeURIComponent(p.slice(i + 1).trim()) }
+  try {
+    for (const p of String(h || '').split(';')) {
+      const i = p.indexOf('=')
+      if (i > 0) out[p.slice(0, i).trim()] = decodeURIComponent(p.slice(i + 1).trim())
+    }
+  } catch { return {} }
   return out
 }
 function sessionUser(req) {
@@ -32,9 +41,29 @@ function sessionUser(req) {
   const v = verifyCookie(c, SECRET, Math.floor(Date.now() / 1000))
   return v ? v.username : null
 }
-function linuxUserExists(u) {
-  const r = require('child_process').spawnSync('id', ['--', u], { stdio: 'ignore' })
-  return r.status === 0
+// Managed accounts only: must exist AND be a member of `devs` (the group
+// reconcile-users.sh puts every MC-created account in). This excludes root,
+// node, daemon, www-data, and any other pre-existing system/service account
+// that `id` would otherwise happily report as "exists".
+function linuxUserManaged(u) {
+  const r = spawnSync('id', ['-nG', '--', u], { encoding: 'utf8' })
+  return r.status === 0 && r.stdout.trim().split(/\s+/).includes('devs')
+}
+// Cached ~30s so a deprovisioned user (reconciler locks/nologins them, but
+// runuser bypasses that) loses IDE + shell access shortly after their MC
+// account is removed/demoted, not just at next cookie expiry (up to 12h).
+function isManaged(username) {
+  const cached = managedCache.get(username)
+  const now = Date.now()
+  if (cached && now - cached.ts < MANAGED_TTL_MS) return cached.managed
+  const managed = linuxUserManaged(username)
+  managedCache.set(username, { managed, ts: now })
+  return managed
+}
+function revoke(username) {
+  managedCache.set(username, { managed: false, ts: Date.now() })
+  const rec = instances.get(username)
+  if (rec) { try { rec.proc.kill('SIGTERM') } catch {}; instances.delete(username) }
 }
 
 async function redeem(token) {
@@ -46,26 +75,51 @@ async function redeem(token) {
   return res.json()
 }
 
+function sockPath(username) { return `${SOCK_DIR}/${username}.sock` }
+
 async function ensureInstance(username) {
   const live = instances.get(username)
   if (live && live.ready) { live.lastSeen = Date.now(); return live }
   if (spawnLocks.has(username)) return spawnLocks.get(username)
   const p = (async () => {
-    const used = new Set([...instances.values()].map(i => i.port))
-    const port = pickPort(used, RANGE)
-    if (port == null) throw new Error('no free IDE port (capacity reached)')
-    // Run code-server AS the Linux user, localhost-only, no code-server auth (proxy is the gate).
-    const proc = spawn('runuser', ['-u', username, '--',
-      'code-server', '--auth', 'none', '--bind-addr', `127.0.0.1:${port}`, `/home/${username}`],
-      { env: { ...process.env, HOME: `/home/${username}` }, stdio: 'ignore', detached: false })
-    const rec = { port, proc, lastSeen: Date.now(), ready: false, failed: null }
+    const sock = sockPath(username)
+    // A unix socket's inode outlives the process that bound it — remove any
+    // leftover file from a previous (killed/crashed) instance so bind() doesn't
+    // fail with EADDRINUSE.
+    try { fs.unlinkSync(sock) } catch {}
+    // Run code-server AS the Linux user, over a per-user unix socket (mode 600)
+    // inside a devs-only directory — no shared TCP port, no port-based cross-user
+    // reachability. The proxy (this process, running as root) is the only thing
+    // that can reach every socket; the code-server auth is disabled because the
+    // proxy's cookie check + the socket's own permissions are the real gate.
+    // Env is an explicit allowlist, NOT inherited from process.env — this proxy's
+    // env holds MC_API_KEY (admin) and IDE_PROXY_SECRET (forges any user's cookie),
+    // neither of which the user's shell/terminal may ever see.
+    // Absolute path: runuser lives in /usr/sbin, which isn't on the restricted
+    // PATH below (that PATH is for code-server's environment, not for finding
+    // runuser itself — spawn() resolves the command using options.env.PATH,
+    // not the proxy's own PATH, when options.env is set).
+    const proc = spawn('/usr/sbin/runuser', ['-u', username, '--',
+      'code-server', '--auth', 'none', '--socket', sock, '--socket-mode', '600', `/home/${username}`],
+      {
+        env: {
+          HOME: `/home/${username}`, USER: username, LOGNAME: username,
+          PATH: '/usr/local/bin:/usr/bin:/bin', LANG: 'C.UTF-8', SHELL: '/bin/bash',
+        },
+        cwd: `/home/${username}`,
+        // Pipe code-server's stdout/stderr into ours so `docker logs` shows it
+        // (rather than discarding it, which makes spawn failures undiagnosable).
+        stdio: ['ignore', 'inherit', 'inherit'],
+        detached: false,
+      })
+    const rec = { sock, proc, lastSeen: Date.now(), ready: false, failed: null, liveSockets: 0 }
     instances.set(username, rec)
     // spawn(2) failing outright (ENOENT/EACCES/EMFILE) emits 'error', not 'exit' —
     // without this listener it's an uncaught exception that kills the whole proxy.
     proc.on('error', (err) => { rec.failed = err; if (instances.get(username) === rec) instances.delete(username) })
     proc.on('exit', () => { if (instances.get(username) === rec) instances.delete(username) })
-    // Wait for the port to accept connections (max ~10s).
-    await waitPort(port, 10000, rec)
+    // Wait for the socket to accept connections (max ~10s).
+    await waitSocket(sock, 10000, rec)
     rec.ready = true
     return rec
   })().finally(() => spawnLocks.delete(username))
@@ -73,13 +127,12 @@ async function ensureInstance(username) {
   return p
 }
 
-function waitPort(port, timeoutMs, rec) {
-  const net = require('net')
+function waitSocket(sock, timeoutMs, rec) {
   const deadline = Date.now() + timeoutMs
   return new Promise((resolve, reject) => {
     const tryOnce = () => {
       if (rec.failed) return reject(rec.failed)
-      const s = net.connect(port, '127.0.0.1')
+      const s = net.connect(sock)
       s.once('connect', () => { s.destroy(); resolve() })
       s.once('error', () => {
         s.destroy()
@@ -98,9 +151,14 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/auth') {
       const token = url.searchParams.get('token') || ''
       const info = await redeem(token).catch(() => null)
-      if (!info || !info.username) { res.writeHead(401); return res.end('Invalid or expired IDE link. Reopen from Mission Control.') }
-      const username = sanitizeUsername(info.username)
-      if (!username || !linuxUserExists(username)) { res.writeHead(503); return res.end('Your dev account is still provisioning — try again in a minute.') }
+      // MC is authoritative: use its linux_username verbatim, no re-derivation here.
+      // Still validated as a shape safe to embed in a filesystem path / spawn arg
+      // (trust-boundary input check, not a re-derivation of the identity itself).
+      if (!info || !info.linux_username || !/^[a-z0-9_-]+$/.test(info.linux_username)) {
+        res.writeHead(401); return res.end('Invalid or expired IDE link. Reopen from Mission Control.')
+      }
+      const username = info.linux_username
+      if (!isManaged(username)) { res.writeHead(503); return res.end('Your dev account is still provisioning — try again in a minute.') }
       const exp = Math.floor(Date.now() / 1000) + 12 * 3600
       const cookie = signCookie(username, exp, SECRET)
       // 'auto' trusts X-Forwarded-Proto from a TLS-terminating reverse proxy in front of us.
@@ -110,13 +168,19 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(302, { 'Set-Cookie': `${COOKIE}=${encodeURIComponent(cookie)}; Path=/; HttpOnly; SameSite=Lax${secure}`, Location: '/' })
       return res.end()
     }
+    // Check the dead-end path BEFORE deriving the session, otherwise a
+    // no-cookie request loops: redirect -> /auth-required -> still no cookie -> redirect ...
+    if (url.pathname === '/auth-required') { res.writeHead(401); return res.end('No IDE session. Open the IDE from Mission Control.') }
     const username = sessionUser(req)
     if (!username) { res.writeHead(302, { Location: '/auth-required' }); return res.end() }
-    if (url.pathname === '/auth-required') { res.writeHead(401); return res.end('No IDE session. Open the IDE from Mission Control.') }
+    if (!isManaged(username)) { revoke(username); res.writeHead(403); return res.end('Your dev account has been deprovisioned.') }
     let inst
-    try { inst = await ensureInstance(username) } catch (e) { res.writeHead(503); return res.end(String(e.message || e)) }
+    try { inst = await ensureInstance(username) } catch (e) {
+      console.error(`[ide-proxy] ensureInstance(${username}) failed:`, e)
+      res.writeHead(503); return res.end('Could not start your IDE. Try again shortly.')
+    }
     inst.lastSeen = Date.now()
-    proxy.web(req, res, { target: `http://127.0.0.1:${inst.port}` })
+    proxy.web(req, res, { target: { socketPath: inst.sock } })
   } catch (e) {
     try { res.writeHead(500); res.end('Internal error') } catch {}
   }
@@ -126,20 +190,25 @@ const server = http.createServer(async (req, res) => {
 server.on('upgrade', async (req, socket, head) => {
   try {
     const username = sessionUser(req)
-    if (!username) { socket.destroy(); return }
+    if (!username || !isManaged(username)) { socket.destroy(); return }
     let inst
     try { inst = await ensureInstance(username) } catch { socket.destroy(); return }
     inst.lastSeen = Date.now()
-    proxy.ws(req, socket, head, { target: `http://127.0.0.1:${inst.port}` })
+    // Count live sockets so the idle sweeper doesn't kill a session mid-use
+    // (lastSeen was otherwise only bumped at upgrade time, never per-frame).
+    inst.liveSockets++
+    socket.on('close', () => { inst.liveSockets = Math.max(0, inst.liveSockets - 1); inst.lastSeen = Date.now() })
+    proxy.ws(req, socket, head, { target: { socketPath: inst.sock } })
   } catch {
     try { socket.destroy() } catch {}
   }
 })
 
-// Idle sweep.
+// Idle sweep. Skips any instance with live WebSocket connections (open terminal/editor).
 setInterval(() => {
   const now = Date.now()
   for (const [u, rec] of instances) {
+    if (rec.liveSockets > 0) continue
     if (now - rec.lastSeen > IDLE_MS) { try { rec.proc.kill('SIGTERM') } catch {} ; instances.delete(u) }
   }
 }, 60_000)
