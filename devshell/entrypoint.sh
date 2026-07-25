@@ -7,17 +7,26 @@ chmod 2775 /srv/repos 2>/dev/null || true
 
 # Browser IDE proxy (per-user code-server). Needs MC_API_KEY + IDE_PROXY_SECRET.
 if [ -n "${IDE_PROXY_SECRET:-}" ] && [ -n "${MC_API_KEY:-}" ]; then
-  # Per-user code-server unix sockets live here. root:devs + sticky bit: any
-  # devs-group member can create their own socket (needed since code-server
-  # runs as that user, not root), but the sticky bit stops one user from
-  # deleting/replacing another user's socket file. The socket file itself is
-  # created with --socket-mode 600 (owner-only), which is what actually blocks
-  # a different user from connecting to it.
+  # Per-user code-server unix sockets live under here. Traverse-only, NOT
+  # group-writable: a shared group-writable dir (even sticky) lets any devs
+  # member CREATE a socket that doesn't exist yet at another user's path —
+  # sticky only stops deleting an existing one. root creates each per-user
+  # subdirectory (0700, owned by that user) before spawning into it, so no
+  # other user can create anything under /run/ide at all.
   mkdir -p /run/ide
-  chown root:devs /run/ide
-  chmod 1770 /run/ide
+  chown root:root /run/ide
+  chmod 0711 /run/ide
   echo "[mc-devshell] starting ide-proxy on :${IDE_PROXY_PORT:-8443}"
-  ( cd /opt/ide-proxy && while true; do node server.js || true; echo "[ide-proxy] exited, restarting in 2s" >&2; sleep 2; done ) &
+  ( cd /opt/ide-proxy && while true; do
+      # A restarted proxy has an empty in-memory instance map — without this,
+      # the next request per user unlinks their socket and spawns a fresh
+      # code-server, orphaning the still-running old one (never swept, never
+      # referenced again).
+      pkill -f 'code-server --auth none --socket /run/ide/' || true
+      node server.js || true
+      echo "[ide-proxy] exited, restarting in 2s" >&2
+      sleep 2
+    done ) &
 fi
 
 echo "[mc-devshell] starting sshd on :22"

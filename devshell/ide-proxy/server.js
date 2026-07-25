@@ -75,23 +75,44 @@ async function redeem(token) {
   return res.json()
 }
 
-function sockPath(username) { return `${SOCK_DIR}/${username}.sock` }
+// Each user gets their OWN subdirectory (0700, owned by them), created by
+// root right before spawn. /run/ide itself is 0711 root:root (traverse-only,
+// not group-writable) — so no other user can create anything under it, let
+// alone squat a not-yet-existing socket path (a shared writable dir, even
+// sticky, only stops DELETING an existing entry, not creating a missing one).
+function sockDir(username) { return `${SOCK_DIR}/${username}` }
+function sockPath(username) { return `${sockDir(username)}/s.sock` }
+
+function getIds(username) {
+  const uid = spawnSync('id', ['-u', '--', username], { encoding: 'utf8' })
+  const gid = spawnSync('id', ['-g', '--', username], { encoding: 'utf8' })
+  if (uid.status !== 0 || gid.status !== 0) throw new Error(`cannot resolve uid/gid for ${username}`)
+  return { uid: Number(uid.stdout.trim()), gid: Number(gid.stdout.trim()) }
+}
 
 async function ensureInstance(username) {
   const live = instances.get(username)
   if (live && live.ready) { live.lastSeen = Date.now(); return live }
   if (spawnLocks.has(username)) return spawnLocks.get(username)
   const p = (async () => {
+    const { uid, gid } = getIds(username)
+    const dir = sockDir(username)
     const sock = sockPath(username)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.chmodSync(dir, 0o700)
+    fs.chownSync(dir, uid, gid)
     // A unix socket's inode outlives the process that bound it — remove any
     // leftover file from a previous (killed/crashed) instance so bind() doesn't
-    // fail with EADDRINUSE.
+    // fail with EADDRINUSE. Safe here (unlike a shared dir): this directory is
+    // owned by `username` alone, nobody else could have raced to put anything
+    // in it (see sockDir comment above).
     try { fs.unlinkSync(sock) } catch {}
     // Run code-server AS the Linux user, over a per-user unix socket (mode 600)
-    // inside a devs-only directory — no shared TCP port, no port-based cross-user
-    // reachability. The proxy (this process, running as root) is the only thing
-    // that can reach every socket; the code-server auth is disabled because the
-    // proxy's cookie check + the socket's own permissions are the real gate.
+    // inside that user's own directory — no shared TCP port, no shared
+    // directory another user could squat a path in. The proxy (this process,
+    // running as root) is the only thing that can reach every socket; the
+    // code-server auth is disabled because the proxy's cookie check + the
+    // socket's own permissions + the owning directory are the real gate.
     // Env is an explicit allowlist, NOT inherited from process.env — this proxy's
     // env holds MC_API_KEY (admin) and IDE_PROXY_SECRET (forges any user's cookie),
     // neither of which the user's shell/terminal may ever see.
@@ -118,8 +139,20 @@ async function ensureInstance(username) {
     // without this listener it's an uncaught exception that kills the whole proxy.
     proc.on('error', (err) => { rec.failed = err; if (instances.get(username) === rec) instances.delete(username) })
     proc.on('exit', () => { if (instances.get(username) === rec) instances.delete(username) })
-    // Wait for the socket to accept connections (max ~10s).
-    await waitSocket(sock, 10000, rec)
+    try {
+      // Wait for the socket to accept connections (max ~10s).
+      await waitSocket(sock, 10000, rec)
+      // Belt-and-braces: the directory ownership already guarantees this, but
+      // assert it directly on the socket inode too before trusting it.
+      if (fs.statSync(sock).uid !== uid) throw new Error(`socket owner mismatch for ${username}`)
+    } catch (e) {
+      // Don't leave a timed-out/mismatched spawn running unreferenced — kill
+      // it now, otherwise a retry spawns a second process and this one's exit
+      // handler no longer matches `instances.get(username)`, leaking forever.
+      try { proc.kill('SIGKILL') } catch {}
+      if (instances.get(username) === rec) instances.delete(username)
+      throw e
+    }
     rec.ready = true
     return rec
   })().finally(() => spawnLocks.delete(username))
@@ -154,7 +187,7 @@ const server = http.createServer(async (req, res) => {
       // MC is authoritative: use its linux_username verbatim, no re-derivation here.
       // Still validated as a shape safe to embed in a filesystem path / spawn arg
       // (trust-boundary input check, not a re-derivation of the identity itself).
-      if (!info || !info.linux_username || !/^[a-z0-9_-]+$/.test(info.linux_username)) {
+      if (!info || !info.linux_username || !/^[a-z][a-z0-9_-]{1,30}[a-z0-9]$/.test(info.linux_username)) {
         res.writeHead(401); return res.end('Invalid or expired IDE link. Reopen from Mission Control.')
       }
       const username = info.linux_username
@@ -204,12 +237,19 @@ server.on('upgrade', async (req, socket, head) => {
   }
 })
 
-// Idle sweep. Skips any instance with live WebSocket connections (open terminal/editor).
+// Idle sweep. Skips any instance with live WebSocket connections (open
+// terminal/editor) — EXCEPT a deprovisioned user, who gets revoked (which
+// SIGTERMs the instance and drops the WS) regardless of live sockets; an
+// offboarded user with a backgrounded tab must not proxy forever. Also caps
+// how long a live socket alone can pin an instance (4x IDLE_MS) — otherwise
+// a single held-open tab is an unbounded RAM liability with no idle bound.
 setInterval(() => {
   const now = Date.now()
   for (const [u, rec] of instances) {
-    if (rec.liveSockets > 0) continue
-    if (now - rec.lastSeen > IDLE_MS) { try { rec.proc.kill('SIGTERM') } catch {} ; instances.delete(u) }
+    if (!isManaged(u)) { revoke(u); continue }
+    const idleMs = now - rec.lastSeen
+    if (rec.liveSockets > 0 && idleMs < IDLE_MS * 4) continue
+    if (idleMs > IDLE_MS) { try { rec.proc.kill('SIGTERM') } catch {} ; instances.delete(u) }
   }
 }, 60_000)
 
