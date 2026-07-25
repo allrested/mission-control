@@ -282,9 +282,15 @@ export const spawnAgentSchema = z.object({
   timeoutSeconds: z.number().min(10).max(3600).default(300),
 })
 
+// Shared with any path that provisions a user outside the create-user form
+// (OAuth access-request approval, trusted-proxy-header auto-provisioning) —
+// these usernames end up as Linux account names via the devshell reconciler,
+// which only accepts this exact shape (see devshell/reconcile-users.sh).
+export const LINUX_USERNAME_REGEX = /^[a-z][a-z0-9_-]{1,30}[a-z0-9]$/
+
 export const createUserSchema = z.object({
   username: z.string().trim().toLowerCase()
-    .regex(/^[a-z][a-z0-9_-]{1,30}[a-z0-9]$/, 'Invalid username'),
+    .regex(LINUX_USERNAME_REGEX, 'Invalid username'),
   password: z.string().min(12, 'Password must be at least 12 characters'),
   display_name: z.string().optional(),
   role: z.enum(['admin', 'operator', 'viewer']).default('operator'),

@@ -4,6 +4,7 @@ import { hashPassword, verifyPassword, verifyPasswordWithRehashCheck } from './p
 import { logSecurityEvent } from './security-events'
 import { extractClientIpFromTrusted } from './request'
 import { parseMcSessionCookieHeader } from './session-cookie'
+import { LINUX_USERNAME_REGEX } from './validation'
 
 // Trusted IPs for proxy auth header (comma-separated)
 const PROXY_AUTH_TRUSTED_IPS = new Set(
@@ -424,6 +425,13 @@ function resolveOrProvisionProxyUser(username: string): User | null {
     if (!defaultRole || !(['viewer', 'operator', 'admin'] as const).includes(defaultRole as User['role'])) {
       return null
     }
+
+    // The trusted proxy header is taken verbatim from an upstream header, unlike
+    // the create-user form (gated by createUserSchema). Reject rather than
+    // sanitize a non-conformant name — this becomes a Linux account via the
+    // devshell reconciler, and silently mangling an identity assertion here is
+    // worse than just refusing to auto-provision it.
+    if (!LINUX_USERNAME_REGEX.test(username)) return null
 
     // Random password — proxy users cannot log in via the local login form
     return createUser(username, randomBytes(32).toString('hex'), username, defaultRole as User['role'])

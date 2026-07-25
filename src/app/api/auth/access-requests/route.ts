@@ -4,10 +4,21 @@ import { createUser, getUserFromRequest , requireRole } from '@/lib/auth'
 import { getDatabase, logAuditEvent } from '@/lib/db'
 import { validateBody, accessRequestActionSchema } from '@/lib/validation'
 import { identitySecurityMutationLimiter } from '@/lib/rate-limit'
+import { LINUX_USERNAME_REGEX } from '@/lib/validation'
 
+// Must always produce something matching LINUX_USERNAME_REGEX — this becomes
+// a Linux account name via the devshell reconciler, which normalizes bytes in
+// C-locale (not Unicode-aware like JS), so any non-ASCII/dotted name we let
+// through here can drift from what the reconciler actually creates (two MC
+// users colliding onto one Linux account). Producing a conformant name at
+// the source avoids needing the two normalizers to agree bit-for-bit.
 function makeUsernameFromEmail(email: string): string {
-  const base = email.split('@')[0].replace(/[^a-z0-9._-]/gi, '').toLowerCase() || 'user'
-  return base.slice(0, 28)
+  let base = (email.split('@')[0] || '').toLowerCase().replace(/[^a-z0-9_-]/g, '_')
+  if (!/^[a-z]/.test(base)) base = 'u' + base
+  base = base.slice(0, 31) // leave room for a trailing alnum char below
+  if (!/[a-z0-9]$/.test(base)) base += '0'
+  while (base.length < 3) base += '0'
+  return LINUX_USERNAME_REGEX.test(base) ? base : 'user0'
 }
 
 function ensureUniqueUsername(base: string): string {
