@@ -17,6 +17,9 @@ dist/
 
 # npm (project uses pnpm)
 package-lock.json
+# ...except devshell/ide-proxy, a standalone npm package built via `npm ci`
+# in its own Dockerfile stage — it needs a committed lockfile for reproducibility.
+!/devshell/ide-proxy/package-lock.json
 
 # Debug
 npm-debug.log*

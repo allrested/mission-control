@@ -82,9 +82,12 @@ services:
       - PORT=${PORT:-3000}
       - NEXT_PUBLIC_GATEWAY_OPTIONAL=true
 
+  # Opt-in: docker compose --profile devshell up
   mc-devshell:
     build: ./devshell
     container_name: mc-devshell
+    profiles:
+      - devshell
     depends_on:
       - mission-control
     # NOTE: mission-control's MC_ALLOWED_HOSTS must include the internal service name
@@ -96,10 +99,11 @@ services:
       - RECONCILE_INTERVAL=${RECONCILE_INTERVAL:-30}
       - IDE_PROXY_SECRET=${IDE_PROXY_SECRET:?set IDE_PROXY_SECRET in .env}
       - IDE_IDLE_MINUTES=${IDE_IDLE_MINUTES:-30}
-      - IDE_PORT_RANGE=${IDE_PORT_RANGE:-9000-9099}
     ports:
       - "${DEVSHELL_SSH_PORT:-2222}:22"
-      - "${DEVSHELL_IDE_PORT:-8443}:8443"
+      # Loopback-only by default — no TLS terminator in front of code-server's
+      # session cookie otherwise. Set DEVSHELL_IDE_BIND to widen (e.g. 0.0.0.0).
+      - "${DEVSHELL_IDE_BIND:-127.0.0.1}:${DEVSHELL_IDE_PORT:-8443}:8443"
     volumes:
       - mc-homes:/home
       # Shared code — same dir the developers and agents use.
