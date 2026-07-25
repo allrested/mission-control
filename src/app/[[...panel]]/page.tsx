@@ -311,7 +311,15 @@ export default function Home() {
         if (data?.processUser) {
           setDefaultOrgName(data.processUser)
         }
-        if (data?.interfaceMode === 'essential' || data?.interfaceMode === 'full') {
+        // Interface mode is a per-user preference: a local choice always wins.
+        // The server value (global `general.interface_mode`) is only the
+        // default for someone who has never picked one — otherwise a non-admin,
+        // whose choice can't persist server-side, gets reset on every load.
+        let localMode: string | null = null
+        try { localMode = localStorage.getItem('mc-interface-mode') } catch {}
+        if (localMode === 'essential' || localMode === 'full') {
+          setInterfaceMode(localMode)
+        } else if (data?.interfaceMode === 'essential' || data?.interfaceMode === 'full') {
           setInterfaceMode(data.interfaceMode)
         }
 
@@ -539,8 +547,10 @@ function ContentRouter({ tab }: { tab: string }) {
             variant="outline"
             size="sm"
             onClick={async () => {
+              // setInterfaceMode persists the per-user choice locally; the
+              // global default is admin-only, so don't attempt it here (a
+              // non-admin would just 403 into a swallowed catch).
               setInterfaceMode('full')
-              try { await apiFetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ settings: { 'general.interface_mode': 'full' } }) }) } catch {}
             }}
           >
             {tp('switchToFull')}

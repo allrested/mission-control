@@ -124,7 +124,21 @@ const gatewayOnlyPanels = new Set([
   'gateways', 'gateway-config', 'channels', 'nodes', 'exec-approvals',
   ...getPluginNavItems().filter(pi => pi.gatewayOnly).map(pi => pi.id),
 ])
-const adminOnlyPanels = new Set<string>([])
+// Panels whose APIs require an admin role — showing them to operator/viewer
+// users only yields a 403 once they click. Each entry below is backed by a
+// `requireRole(request, 'admin')` (or an explicit role !== 'admin' check) in
+// the panel's route. NOTE: 'settings' is deliberately NOT here — non-admins
+// need it for their own SSH Access / Open IDE sections.
+const adminOnlyPanels = new Set<string>([
+  'audit',          // /api/audit
+  'users',          // /api/auth/users (role !== 'admin')
+  'security',       // /api/security-audit, /api/security-scan
+  'debug',          // /api/debug
+  'integrations',   // /api/integrations
+  'webhooks',       // /api/webhooks
+  'cron',           // /api/cron
+  'gateway-config', // /api/gateway-config
+])
 
 export function NavRail() {
   const { activeTab, connection, dashboardMode, currentUser, activeTenant, tenants, osUsers, setActiveTenant, fetchTenants, fetchOsUsers, activeProject, projects, setActiveProject, fetchProjects, sidebarExpanded, collapsedGroups, toggleSidebar, toggleGroup, defaultOrgName, interfaceMode, setInterfaceMode } = useMissionControl()
@@ -906,7 +920,11 @@ function ContextSwitcher({ currentUser, isAdmin, isLocal, isConnected, tenants, 
                     setInterfaceMode('essential')
                     const essentialIds = new Set(['overview', 'agents', 'tasks', 'chat', 'activity', 'logs', 'settings'])
                     if (!essentialIds.has(activeTab)) navigateToPanel('overview')
-                    try { await apiFetch('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: { 'general.interface_mode': 'essential' } }) }) } catch {}
+                    // Local preference is authoritative; only an admin can also
+                    // move the deployment-wide default (non-admins would 403).
+                    if (isAdmin) {
+                      try { await apiFetch('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: { 'general.interface_mode': 'essential' } }) }) } catch {}
+                    }
                   }}
                   className={`flex items-center gap-1 px-2 py-1 text-[11px] font-medium transition-colors ${
                     interfaceMode === 'essential'
@@ -921,7 +939,9 @@ function ContextSwitcher({ currentUser, isAdmin, isLocal, isConnected, tenants, 
                   onClick={async () => {
                     if (interfaceMode === 'full') return
                     setInterfaceMode('full')
-                    try { await apiFetch('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: { 'general.interface_mode': 'full' } }) }) } catch {}
+                    if (isAdmin) {
+                      try { await apiFetch('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: { 'general.interface_mode': 'full' } }) }) } catch {}
+                    }
                   }}
                   className={`flex items-center gap-1 px-2 py-1 text-[11px] font-medium transition-colors border-l border-border ${
                     interfaceMode === 'full'

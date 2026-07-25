@@ -940,9 +940,15 @@ export const useMissionControl = create<MissionControlStore>()(
       set({ dashboardLayout: layout })
     },
 
-    // Interface Mode
+    // Interface Mode — a PER-USER preference, so it lives in localStorage.
+    // It used to be read/written via the global `general.interface_mode`
+    // setting, which is admin-only: a non-admin's choice silently 403'd and
+    // was overwritten by the server value on the next load.
     interfaceMode: 'essential' as const,
-    setInterfaceMode: (mode) => set({ interfaceMode: mode }),
+    setInterfaceMode: (mode) => {
+      try { localStorage.setItem('mc-interface-mode', mode) } catch {}
+      set({ interfaceMode: mode })
+    },
 
     // UI State — sidebar & layout persistence
     activeTab: 'overview',
