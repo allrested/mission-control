@@ -45,13 +45,21 @@ function sessionUser(req) {
 // reconcile-users.sh puts every MC-created account in). This excludes root,
 // node, daemon, www-data, and any other pre-existing system/service account
 // that `id` would otherwise happily report as "exists".
+// Tri-state: true/false is a real answer; null means the check itself
+// couldn't run (spawnSync failure — EAGAIN/ENOMEM under load, not "denied").
+// Callers must NOT treat null as false, or a fork blip mass-revokes live
+// sessions that never actually failed the group check.
 function linuxUserManaged(u) {
   const r = spawnSync('id', ['-nG', '--', u], { encoding: 'utf8' })
+  if (r.error) return null
   return r.status === 0 && r.stdout.trim().split(/\s+/).includes('devs')
 }
 // Cached ~30s so a deprovisioned user (reconciler locks/nologins them, but
 // runuser bypasses that) loses IDE + shell access shortly after their MC
 // account is removed/demoted, not just at next cookie expiry (up to 12h).
+// Returns true/false/null (see linuxUserManaged) — null is cached too (so a
+// sustained fork failure doesn't hammer spawnSync every request) but must be
+// read as "unknown", never as "denied", by every caller.
 function isManaged(username) {
   const cached = managedCache.get(username)
   const now = Date.now()
@@ -145,6 +153,15 @@ async function ensureInstance(username) {
       // Belt-and-braces: the directory ownership already guarantees this, but
       // assert it directly on the socket inode too before trusting it.
       if (fs.statSync(sock).uid !== uid) throw new Error(`socket owner mismatch for ${username}`)
+      // Hand the directory back to root now that code-server already holds the
+      // bound fd and never writes here again. Otherwise the user owns this
+      // 0700 dir for the instance's whole life and could `rm s.sock && ln -s
+      // /elsewhere.sock s.sock` — every later proxy.web/proxy.ws re-resolves
+      // the path as root with no re-assertion (arbitrary-socket SSRF). A
+      // respawn re-chowns to the user before spawning, then takes it back
+      // again here.
+      fs.chownSync(dir, 0, 0)
+      fs.chmodSync(dir, 0o711)
     } catch (e) {
       // Don't leave a timed-out/mismatched spawn running unreferenced — kill
       // it now, otherwise a retry spawns a second process and this one's exit
@@ -191,7 +208,8 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(401); return res.end('Invalid or expired IDE link. Reopen from Mission Control.')
       }
       const username = info.linux_username
-      if (!isManaged(username)) { res.writeHead(503); return res.end('Your dev account is still provisioning — try again in a minute.') }
+      // Only an explicit `false` denies — `null` (check couldn't run) fails open.
+      if (isManaged(username) === false) { res.writeHead(503); return res.end('Your dev account is still provisioning — try again in a minute.') }
       const exp = Math.floor(Date.now() / 1000) + 12 * 3600
       const cookie = signCookie(username, exp, SECRET)
       // 'auto' trusts X-Forwarded-Proto from a TLS-terminating reverse proxy in front of us.
@@ -206,7 +224,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/auth-required') { res.writeHead(401); return res.end('No IDE session. Open the IDE from Mission Control.') }
     const username = sessionUser(req)
     if (!username) { res.writeHead(302, { Location: '/auth-required' }); return res.end() }
-    if (!isManaged(username)) { revoke(username); res.writeHead(403); return res.end('Your dev account has been deprovisioned.') }
+    if (isManaged(username) === false) { revoke(username); res.writeHead(403); return res.end('Your dev account has been deprovisioned.') }
     let inst
     try { inst = await ensureInstance(username) } catch (e) {
       console.error(`[ide-proxy] ensureInstance(${username}) failed:`, e)
@@ -223,13 +241,14 @@ const server = http.createServer(async (req, res) => {
 server.on('upgrade', async (req, socket, head) => {
   try {
     const username = sessionUser(req)
-    if (!username || !isManaged(username)) { socket.destroy(); return }
+    if (!username || isManaged(username) === false) { socket.destroy(); return }
     let inst
     try { inst = await ensureInstance(username) } catch { socket.destroy(); return }
     inst.lastSeen = Date.now()
     // Count live sockets so the idle sweeper doesn't kill a session mid-use
     // (lastSeen was otherwise only bumped at upgrade time, never per-frame).
     inst.liveSockets++
+    socket.on('data', () => { inst.lastSeen = Date.now() })
     socket.on('close', () => { inst.liveSockets = Math.max(0, inst.liveSockets - 1); inst.lastSeen = Date.now() })
     proxy.ws(req, socket, head, { target: { socketPath: inst.sock } })
   } catch {

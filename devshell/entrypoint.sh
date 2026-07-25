@@ -22,7 +22,10 @@ if [ -n "${IDE_PROXY_SECRET:-}" ] && [ -n "${MC_API_KEY:-}" ]; then
       # the next request per user unlinks their socket and spawns a fresh
       # code-server, orphaning the still-running old one (never swept, never
       # referenced again).
-      pkill -f 'code-server --auth none --socket /run/ide/' || true
+      # Anchored on the socket flag/path, not the full command line — the rest
+      # (e.g. code-server's launcher passing its install dir as argv[1]) is
+      # incidental and would silently stop matching on a version bump.
+      pkill -f -- '--socket /run/ide/' || true
       node server.js || true
       echo "[ide-proxy] exited, restarting in 2s" >&2
       sleep 2
