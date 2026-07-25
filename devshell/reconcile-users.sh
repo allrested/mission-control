@@ -45,6 +45,12 @@ while IFS= read -r row; do
     ln -sfn /srv/repos "/home/${luser}/repos"
     mkdir -p "/home/${luser}/.claude" "/home/${luser}/.codex" "/home/${luser}/.ssh"
   fi
+  # A pre-existing home dir (e.g. left over from a locked-out account whose
+  # username got reused after a uid rollover) keeps its old owner — useradd -m
+  # only chowns on fresh creation. Re-assert ownership every cycle so the
+  # account always owns its own home (otherwise a stale uid match could let a
+  # different current user read/write into it).
+  chown "${luser}:${luser}" "/home/${luser}"
   chmod 700 "/home/${luser}"
   chmod 700 "/home/${luser}/.ssh"
 
