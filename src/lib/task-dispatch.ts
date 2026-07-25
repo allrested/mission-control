@@ -1371,6 +1371,49 @@ export function pickRuntimeRoute(
   }
 }
 
+/**
+ * True when there is no reachable OpenClaw gateway but a direct CLI/API path
+ * exists — i.e. callers that would normally invoke the gateway should instead
+ * run through `callDirectly`. This is the hermes/claude/codex-first setup.
+ */
+export function shouldDispatchDirectly(): boolean {
+  return !isGatewayAvailable() && isDirectDispatchAvailable()
+}
+
+/**
+ * Run an ad-hoc prompt (not a stored task) through the gateway-free dispatch
+ * path, so "spawn agent" works without OpenClaw. Routing is model-based: pass
+ * `model` to steer it, otherwise the task-complexity classifier picks the tier.
+ *
+ * ponytail: builds a synthetic DispatchableTask because the direct path is
+ * task-shaped. id 0 is safe — the only DB read it drives is the soul lookup,
+ * which simply returns null for a non-existent agent.
+ */
+export async function runDirectSpawn(opts: {
+  prompt: string
+  label: string
+  model?: string | null
+  workspaceId: number
+}): Promise<AgentResponseParsed> {
+  const synthetic: DispatchableTask = {
+    id: 0,
+    title: opts.label,
+    description: opts.prompt,
+    status: 'in_progress',
+    priority: 'medium',
+    assigned_to: opts.label,
+    workspace_id: opts.workspaceId,
+    agent_name: opts.label,
+    agent_id: 0,
+    // dispatchModel is how callDirectly honors an explicit model override.
+    agent_config: opts.model ? JSON.stringify({ dispatchModel: opts.model }) : null,
+    ticket_prefix: null,
+    project_ticket_no: null,
+    project_id: null,
+  }
+  return callDirectly(synthetic, opts.prompt)
+}
+
 async function callDirectly(task: DispatchableTask, prompt: string): Promise<AgentResponseParsed> {
   // Honor the agent's declared runtime first — this is what the create-agent
   // Runtime picker sets, so "delegate to claude/codex/hermes" routes to the

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireRole } from '@/lib/auth'
 import { callOpenClawGateway, isUnknownMethodError } from '@/lib/openclaw-gateway'
+import { shouldDispatchDirectly, runDirectSpawn } from '@/lib/task-dispatch'
 import { config } from '@/lib/config'
 import { readdir, readFile, stat } from 'fs/promises'
 import { join } from 'path'
@@ -78,8 +79,22 @@ export async function POST(request: NextRequest) {
     try {
       let result: any
       let compatibilityFallbackUsed = false
-      let invocationMethod: 'sessions_spawn' | 'agent' = 'sessions_spawn'
+      let invocationMethod: 'sessions_spawn' | 'agent' | 'direct' = 'sessions_spawn'
 
+      // No OpenClaw gateway reachable? Run the prompt through the direct
+      // claude/codex/hermes dispatch path instead of failing with
+      // ECONNREFUSED. This is the hermes-first / standalone setup.
+      if (shouldDispatchDirectly()) {
+        invocationMethod = 'direct'
+        const direct = await runDirectSpawn({
+          prompt: task,
+          label,
+          model,
+          workspaceId: auth.user.workspace_id ?? 1,
+        })
+        if (!direct.text) throw new Error('Direct dispatch returned an empty response')
+        result = { payloads: [{ text: direct.text }], ...(direct.sessionId ? { sessionId: direct.sessionId } : {}) }
+      } else {
       try {
         // Try with tools.profile first; drop it for gateways that reject the field.
         try {
@@ -104,6 +119,7 @@ export async function POST(request: NextRequest) {
         compatibilityFallbackUsed = true
         invocationMethod = 'agent'
       }
+      } // end gateway path
 
       const sessionInfo =
         result?.sessionId ||
