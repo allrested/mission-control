@@ -82,12 +82,9 @@ services:
       - PORT=${PORT:-3000}
       - NEXT_PUBLIC_GATEWAY_OPTIONAL=true
 
-  # Opt-in: docker compose --profile devshell up
   mc-devshell:
     build: ./devshell
     container_name: mc-devshell
-    profiles:
-      - devshell
     depends_on:
       - mission-control
     # NOTE: mission-control's MC_ALLOWED_HOSTS must include the internal service name
@@ -97,7 +94,11 @@ services:
       - MC_URL=${MC_INTERNAL_URL:-http://mission-control:3000}
       - MC_API_KEY=${MC_API_KEY:?set MC_API_KEY in .env for the devshell reconciler}
       - RECONCILE_INTERVAL=${RECONCILE_INTERVAL:-30}
-      - IDE_PROXY_SECRET=${IDE_PROXY_SECRET:?set IDE_PROXY_SECRET in .env}
+      # Cookie-signing key for the IDE proxy. Leave empty and the entrypoint
+      # generates one and persists it on the homes volume, so a plain
+      # `docker compose up` works without pre-seeding secrets. Set it
+      # explicitly to share one key across replicas.
+      - IDE_PROXY_SECRET=${IDE_PROXY_SECRET:-}
       - IDE_IDLE_MINUTES=${IDE_IDLE_MINUTES:-30}
     ports:
       - "${DEVSHELL_SSH_PORT:-2222}:22"

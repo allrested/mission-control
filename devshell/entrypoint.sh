@@ -5,6 +5,23 @@ chmod 2775 /srv/repos 2>/dev/null || true
 # Background reconcile loop.
 ( while true; do /usr/local/bin/reconcile-users.sh || true; sleep "${RECONCILE_INTERVAL:-30}"; done ) &
 
+# Cookie-signing key: generate + persist one if the operator didn't supply it,
+# so a plain `docker compose up` works without pre-seeding secrets (same pattern
+# mission-control's entrypoint uses for AUTH_SECRET/API_KEY). Kept on the homes
+# volume so IDE sessions survive a restart; root-only, /home is 0755 so users
+# can traverse but not read it.
+IDE_SECRET_FILE=/home/.mc-ide-proxy-secret
+if [ -z "${IDE_PROXY_SECRET:-}" ]; then
+  if [ ! -s "$IDE_SECRET_FILE" ]; then
+    (umask 077; openssl rand -hex 32 > "$IDE_SECRET_FILE" 2>/dev/null \
+      || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$IDE_SECRET_FILE")
+    chown root:root "$IDE_SECRET_FILE"; chmod 600 "$IDE_SECRET_FILE"
+    echo "[mc-devshell] generated IDE_PROXY_SECRET"
+  fi
+  IDE_PROXY_SECRET="$(cat "$IDE_SECRET_FILE")"
+  export IDE_PROXY_SECRET
+fi
+
 # Browser IDE proxy (per-user code-server). Needs MC_API_KEY + IDE_PROXY_SECRET.
 if [ -n "${IDE_PROXY_SECRET:-}" ] && [ -n "${MC_API_KEY:-}" ]; then
   # Per-user code-server unix sockets live under here. Traverse-only, NOT
