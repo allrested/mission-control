@@ -3,9 +3,31 @@ services:
     build: .
     container_name: mission-control
     ports:
-      - "${MC_PORT:-3000}:${PORT:-3000}"
-      # Hermes web dashboard (started manually: hermes dashboard --host 0.0.0.0)
-      - "${HERMES_DASHBOARD_PORT:-9119}:9119"
+      # Behind a reverse proxy (Dokploy/Traefik) these publishes are optional —
+      # Traefik reaches the container over the shared docker network. Set
+      # MC_BIND=127.0.0.1 on a public server so the app isn't reachable by raw
+      # IP, bypassing the proxy (and Cloudflare).
+      - "${MC_BIND:-0.0.0.0}:${MC_PORT:-3000}:${PORT:-3000}"
+      # Hermes web dashboard (autostarted by docker-entrypoint.sh)
+      - "${MC_BIND:-0.0.0.0}:${HERMES_DASHBOARD_PORT:-9119}:9119"
+    labels:
+      # Dokploy/Traefik routing. Two routers on one container: the app (3000)
+      # and the hermes dashboard (9119). Requires TRAEFIK_ENABLE=true and the
+      # dokploy-network attachment below.
+      - traefik.enable=${TRAEFIK_ENABLE:-false}
+      - traefik.docker.network=dokploy-network
+      # Mission Control → ai.flavours.sa
+      - traefik.http.routers.mc.rule=Host(`${MC_DOMAIN:-ai.flavours.sa}`)
+      - traefik.http.routers.mc.entrypoints=websecure
+      - traefik.http.routers.mc.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      - traefik.http.routers.mc.service=mc
+      - traefik.http.services.mc.loadbalancer.server.port=${PORT:-3000}
+      # Hermes dashboard → chat.flavours.sa
+      - traefik.http.routers.mchermes.rule=Host(`${HERMES_DOMAIN:-chat.flavours.sa}`)
+      - traefik.http.routers.mchermes.entrypoints=websecure
+      - traefik.http.routers.mchermes.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      - traefik.http.routers.mchermes.service=mchermes
+      - traefik.http.services.mchermes.loadbalancer.server.port=9119
     environment:
       - PORT=${PORT:-3000}
       # Effective home for the app and agent runtimes (hermes/claude/codex
@@ -101,10 +123,23 @@ services:
       - IDE_PROXY_SECRET=${IDE_PROXY_SECRET:-}
       - IDE_IDLE_MINUTES=${IDE_IDLE_MINUTES:-30}
     ports:
+      # SSH can't go through Traefik's HTTP router — keep it published.
       - "${DEVSHELL_SSH_PORT:-2222}:22"
       # Loopback-only by default — no TLS terminator in front of code-server's
-      # session cookie otherwise. Set DEVSHELL_IDE_BIND to widen (e.g. 0.0.0.0).
+      # session cookie otherwise. Behind Dokploy/Traefik leave it loopback: the
+      # proxy reaches :8443 over the docker network, not via this publish.
       - "${DEVSHELL_IDE_BIND:-127.0.0.1}:${DEVSHELL_IDE_PORT:-8443}:8443"
+    labels:
+      # Browser IDE → ide.flavours.sa. Traefik proxies WebSockets natively,
+      # which code-server's terminal requires. X-Forwarded-Proto: https from
+      # Traefik is what makes the IDE session cookie Secure (see ide-proxy).
+      - traefik.enable=${TRAEFIK_ENABLE:-false}
+      - traefik.docker.network=dokploy-network
+      - traefik.http.routers.mcide.rule=Host(`${IDE_DOMAIN:-ide.flavours.sa}`)
+      - traefik.http.routers.mcide.entrypoints=websecure
+      - traefik.http.routers.mcide.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      - traefik.http.routers.mcide.service=mcide
+      - traefik.http.services.mcide.loadbalancer.server.port=8443
     volumes:
       - mc-homes:/home
       # Shared code — same dir the developers and agents use.

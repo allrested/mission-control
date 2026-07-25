@@ -1,0 +1,37 @@
+# Dokploy / Traefik overlay — attaches the containers to Dokploy's shared
+# network so its Traefik instance can route the domains declared in the base
+# file's labels. Kept as an overlay (not in docker-compose.yml) because
+# `dokploy-network` is external: declaring it in the base file would break a
+# plain local `docker compose up` on a machine that has no Dokploy.
+#
+# Deploy on the server:
+#   docker compose -f docker-compose.yml -f docker-compose.dokploy.yml up -d
+#
+# Required in .env on that server:
+#   TRAEFIK_ENABLE=true
+#   MC_DOMAIN=ai.flavours.sa
+#   HERMES_DOMAIN=chat.flavours.sa
+#   IDE_DOMAIN=ide.flavours.sa
+#   IDE_PUBLIC_URL=https://ide.flavours.sa      # what the "Open IDE" button links to
+#   MC_ALLOWED_HOSTS=ai.flavours.sa,chat.flavours.sa,mission-control,localhost,127.0.0.1,::1
+#   MC_BIND=127.0.0.1                            # don't expose 3000/9119 on the public IP
+#   TRAEFIK_CERTRESOLVER=letsencrypt             # match your Dokploy resolver name
+#
+# Cloudflare: A/CNAME for ai, chat, ide → the server; proxied is fine
+# (WebSockets are enabled by default and code-server's terminal needs them).
+# Use SSL/TLS mode "Full (strict)" since Traefik holds a real certificate.
+
+services:
+  mission-control:
+    networks:
+      - mc-net
+      - dokploy-network
+
+  mc-devshell:
+    networks:
+      - mc-net
+      - dokploy-network
+
+networks:
+  dokploy-network:
+    external: true
