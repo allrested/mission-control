@@ -49,11 +49,15 @@ export function deleteUserSshKey(id: number, userId: number): boolean {
  * multi-tenant. `ORDER BY id` makes a normalized-username collision between
  * two users resolve to the same winner (the earlier-created user) every run.
  */
-export function listAllUsersWithKeys(): Array<{ username: string; workspace_id: number; role: string; public_keys: string[] }> {
+export function listAllUsersWithKeys(): Array<{ id: number; username: string; workspace_id: number; role: string; public_keys: string[] }> {
   const db = getDatabase()
   const users = db.prepare('SELECT id, username, workspace_id, role FROM users ORDER BY id').all() as Array<{ id: number; username: string; workspace_id: number; role: string }>
   const keyStmt = db.prepare('SELECT public_key FROM user_ssh_keys WHERE user_id = ?')
   return users.map(u => ({
+    // id is the dev-shell's ownership marker: a reused username belonging to a
+    // DIFFERENT MC account must not inherit the previous person's home
+    // (~/.claude credentials, ~/.ssh, files). See reconcile-users.sh.
+    id: u.id,
     username: u.username,
     workspace_id: u.workspace_id,
     role: u.role,

@@ -4,6 +4,7 @@ import { createUser, createSession } from '@/lib/auth'
 import { logAuditEvent } from '@/lib/db'
 import { getMcSessionCookieName, getMcSessionCookieOptions, isRequestSecure } from '@/lib/session-cookie'
 import { logger } from '@/lib/logger'
+import { LINUX_USERNAME_REGEX } from '@/lib/validation'
 
 const INSECURE_PASSWORDS = new Set([
   'admin',
@@ -39,12 +40,13 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Username is required' }, { status: 400 })
     }
     const trimmedUsername = username.trim().toLowerCase()
-    if (trimmedUsername.length < 2 || trimmedUsername.length > 64) {
-      return NextResponse.json({ error: 'Username must be 2-64 characters' }, { status: 400 })
-    }
-    if (!/^[a-z0-9_.-]+$/.test(trimmedUsername)) {
+    // Same shape every other user-creating path enforces. MC usernames are
+    // normalized into Linux accounts on the dev-shell, so a name containing
+    // dots (or starting with a digit/hyphen) would either collide with another
+    // user's account or fail to provision. Validate at the trust boundary.
+    if (!LINUX_USERNAME_REGEX.test(trimmedUsername)) {
       return NextResponse.json(
-        { error: 'Username can only contain lowercase letters, numbers, dots, hyphens, and underscores' },
+        { error: 'Username must be 3-32 characters: start with a letter, end with a letter or number, and contain only lowercase letters, numbers, hyphens, and underscores' },
         { status: 400 }
       )
     }

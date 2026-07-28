@@ -29,6 +29,13 @@ while IFS= read -r row; do
   esac
   seen="${seen}${luser} "
 
+  # Which MC account owns this Linux home. A username that is deleted in MC and
+  # later recreated for a DIFFERENT person must not inherit the previous
+  # person's home — their ~/.claude credentials, ~/.ssh and files live there.
+  # Root-owned 0600 so the user can't forge it.
+  mcid="$(echo "$row" | jq -r '.id // empty')"
+  owner_file="/home/${luser}/.mc-owner"
+
   if id -- "$luser" >/dev/null 2>&1; then
     # Account already exists — only manage accounts WE created (members of
     # devs). Never adopt pre-existing system accounts (node, games, sync, ...)
@@ -36,6 +43,15 @@ while IFS= read -r row; do
     if ! id -nG -- "$luser" 2>/dev/null | tr ' ' '\n' | grep -qx devs; then
       echo "reconcile: refusing to adopt existing non-devs account '$luser'"
       continue
+    fi
+    # Same username, different MC account → refuse rather than hand over the
+    # old home. An admin resolves it (archive/remove the home, or rename).
+    if [ -n "$mcid" ] && [ -s "$owner_file" ]; then
+      prev="$(cat "$owner_file" 2>/dev/null)"
+      if [ -n "$prev" ] && [ "$prev" != "$mcid" ]; then
+        echo "reconcile: '$luser' home belongs to MC user id $prev, not $mcid — refusing to reassign"
+        continue
+      fi
     fi
   else
     if ! useradd -m -s /bin/bash -G devs -- "$luser"; then
@@ -53,6 +69,15 @@ while IFS= read -r row; do
   chown "${luser}:${luser}" "/home/${luser}"
   chmod 700 "/home/${luser}"
   chmod 700 "/home/${luser}/.ssh"
+
+  # Stamp/refresh the ownership marker. Homes provisioned before this existed
+  # get claimed by their current MC account on the next cycle (there is no
+  # earlier owner to conflict with), so upgrades are seamless.
+  if [ -n "$mcid" ]; then
+    printf '%s' "$mcid" > "$owner_file" 2>/dev/null || true
+    chown root:root "$owner_file" 2>/dev/null || true
+    chmod 600 "$owner_file" 2>/dev/null || true
+  fi
 
   # Admin → sudo; otherwise ensure not in sudo.
   if [ "$role" = "admin" ]; then usermod -aG sudo -- "$luser" >/dev/null 2>&1 || true; else gpasswd -d "$luser" sudo >/dev/null 2>&1 || true; fi
