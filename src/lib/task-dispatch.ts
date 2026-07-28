@@ -2,6 +2,11 @@ import { existsSync, realpathSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { getDatabase, db_helpers } from './db'
+import {
+  auditClaudeSessionDispatch,
+  ensureClaudeBaseSession,
+  markClaudeBaseSessionMaterialized,
+} from './claude-code-sessions'
 import { callOpenClawGateway } from './openclaw-gateway'
 import { eventBus } from './event-bus'
 import { logger } from './logger'
@@ -40,8 +45,12 @@ interface DispatchableTask {
   agent_name: string
   agent_id: number
   agent_config: string | null
-  /** Agent's declared runtime (set by the create-agent Runtime picker). */
-  runtime_type?: string | null
+  /**
+   * From agents.runtime_type — set by the create-agent Runtime picker.
+   * 'claude' opts into per-agent CLI session dispatch (#602); 'codex'/'hermes'
+   * route through pickRuntimeRoute in callDirectly.
+   */
+  agent_runtime_type?: string | null
   ticket_prefix: string | null
   project_ticket_no: number | null
   project_id: number | null
@@ -1061,11 +1070,23 @@ function isDirectDispatchAvailable(provider?: DirectProvider): boolean {
  * `classifyDirectModel`), and fall back to the alias derived from the family
  * keyword so a stale `claude-opus-4-5` mapping still routes correctly.
  */
+/** Session routing for #602: create materializes the agent's base session under
+ * a server-generated UUID; resume forks a fresh per-task session from it. */
+interface ClaudeCliSessionOptions {
+  create?: string
+  resume?: string
+}
+
+// Bounded CLI output (#602 contract): a runaway child cannot grow dispatch
+// memory without limit. Applies to every claude CLI dispatch path.
+const CLAUDE_CLI_MAX_OUTPUT_BYTES = 1_000_000
+
 async function callClaudeViaCli(
   task: DispatchableTask,
   prompt: string,
   model: string,
   configDir?: string | null,
+  session?: ClaudeCliSessionOptions,
 ): Promise<AgentResponseParsed> {
   const soul = getAgentSoulContent(task)
   const sandbox = resolveCliSandboxOptions(task)
@@ -1073,6 +1094,8 @@ async function callClaudeViaCli(
   // dispatchConfigDir resolved in sandbox options (backward compatible).
   const effectiveConfigDir = configDir === undefined ? sandbox.configDir : configDir
   const args = ['--print', '--output-format', 'json', '--model', model]
+  if (session?.create) args.push('--session-id', session.create)
+  else if (session?.resume) args.push('--resume', session.resume, '--fork-session')
   if (sandbox.allowedTools) args.push('--allowedTools', sandbox.allowedTools.join(','))
   if (sandbox.maxBudgetUsd !== null) args.push('--max-budget-usd', String(sandbox.maxBudgetUsd))
   if (soul) args.push('--append-system-prompt', soul)
@@ -1081,6 +1104,8 @@ async function callClaudeViaCli(
   logger.info(
     {
       taskId: task.id, model, agent: task.agent_name,
+      ...(session?.create ? { sessionCreate: session.create } : {}),
+      ...(session?.resume ? { sessionResume: session.resume } : {}),
       ...(sandboxApplied ? { sandbox: { allowedTools: sandbox.allowedTools, maxBudgetUsd: sandbox.maxBudgetUsd, cwd: sandbox.cwd } } : {}),
     },
     'Dispatching task via Claude CLI',
@@ -1104,14 +1129,25 @@ async function callClaudeViaCli(
     })
     let stdout = ''
     let stderr = ''
+    let outputBytes = 0
     const timeoutMs = 180_000
     const timer = setTimeout(() => {
       proc.kill('SIGTERM')
       reject(new Error(`Claude CLI timed out after ${timeoutMs / 1000}s`))
     }, timeoutMs)
+    const guardOutput = (chunk: Buffer) => {
+      outputBytes += chunk.length
+      if (outputBytes > CLAUDE_CLI_MAX_OUTPUT_BYTES) {
+        clearTimeout(timer)
+        proc.kill('SIGKILL')
+        reject(new Error(`Claude CLI output exceeded ${CLAUDE_CLI_MAX_OUTPUT_BYTES} bytes`))
+        return false
+      }
+      return true
+    }
 
-    proc.stdout.on('data', (d) => { stdout += d.toString() })
-    proc.stderr.on('data', (d) => { stderr += d.toString() })
+    proc.stdout.on('data', (d) => { if (guardOutput(d)) stdout += d.toString() })
+    proc.stderr.on('data', (d) => { if (guardOutput(d)) stderr += d.toString() })
     proc.on('error', (err) => { clearTimeout(timer); reject(err) })
     proc.on('close', (code) => {
       clearTimeout(timer)
@@ -1152,6 +1188,66 @@ async function callClaudeViaCli(
     proc.stdin.write(prompt)
     proc.stdin.end()
   })
+}
+
+/**
+ * #602: dispatch through the agent's persistent Claude Code base session.
+ * First successful dispatch materializes the base session under a
+ * server-generated UUID (`--session-id`); every later dispatch forks a
+ * per-task session from it (`--resume <base> --fork-session`), and the forked
+ * id flows through the normal completion tail into
+ * `tasks.metadata.dispatch_session_id`.
+ *
+ * No-fallback rule: any failure here (missing CLI, auth, expired or damaged
+ * session) is a dispatch failure. We never reroute to the API-key or gateway
+ * paths — those run with different authority than the operator's CLI login.
+ */
+async function dispatchViaClaudeSession(
+  task: DispatchableTask,
+  prompt: string,
+): Promise<AgentResponseParsed> {
+  if (!isClaudeCliAvailable()) {
+    auditClaudeSessionDispatch({
+      agentId: task.agent_id,
+      baseSessionId: '',
+      taskId: task.id,
+      outcome: 'failed',
+      error: 'claude CLI unavailable for runtime_type=claude agent',
+    })
+    throw new Error(
+      `claude runtime dispatch: CLI unavailable for agent ${task.agent_name}; refusing to fall back to a less restrictive provider`,
+    )
+  }
+
+  const base = ensureClaudeBaseSession(task.agent_id)
+  const model = stripProviderPrefix(classifyDirectModel(task))
+  const session = base.materialized ? { resume: base.sessionId } : { create: base.sessionId }
+
+  try {
+    // configDir is undefined here: the #602 session path uses the operator's
+    // own CLI login, not a per-agent credentials dir (that's the rotation path).
+    const response = await callClaudeViaCli(task, prompt, model, undefined, session)
+    if (!base.materialized) {
+      markClaudeBaseSessionMaterialized(task.agent_id, base.sessionId)
+    }
+    auditClaudeSessionDispatch({
+      agentId: task.agent_id,
+      baseSessionId: base.sessionId,
+      taskId: task.id,
+      outcome: 'resumed',
+      forkedSessionId: base.materialized ? response.sessionId : null,
+    })
+    return response
+  } catch (err) {
+    auditClaudeSessionDispatch({
+      agentId: task.agent_id,
+      baseSessionId: base.sessionId,
+      taskId: task.id,
+      outcome: 'failed',
+      error: err instanceof Error ? err.message : String(err),
+    })
+    throw err
+  }
 }
 
 async function callOpenAICompatible(
@@ -1418,7 +1514,7 @@ async function callDirectly(task: DispatchableTask, prompt: string): Promise<Age
   // Honor the agent's declared runtime first — this is what the create-agent
   // Runtime picker sets, so "delegate to claude/codex/hermes" routes to the
   // runtime the operator chose regardless of the model tier heuristic.
-  const route = pickRuntimeRoute(task.runtime_type, { hermes: isHermesCliAvailable() })
+  const route = pickRuntimeRoute(task.agent_runtime_type, { hermes: isHermesCliAvailable() })
   if (route === 'hermes') {
     return callHermesViaCli(task, prompt)
   }
@@ -1852,7 +1948,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
 
   const tasks = db.prepare(`
     SELECT t.*, a.name as agent_name, a.id as agent_id, a.config as agent_config,
-           a.runtime_type as runtime_type,
+           a.runtime_type as agent_runtime_type,
            p.ticket_prefix, t.project_ticket_no
     FROM tasks t
     JOIN agents a ON a.name = t.assigned_to AND a.workspace_id = t.workspace_id
@@ -1945,9 +2041,23 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
       let agentResponse: AgentResponseParsed
       const useDirectApi = !isGatewayAvailable() && isDirectDispatchAvailable()
 
-      if (useDirectApi) {
-        // Direct dispatch — provider chosen by the agent's runtime_type, else
-        // by `dispatchModel` prefix (Anthropic / OpenAI / local). No gateway.
+      if (String(task.agent_runtime_type || '').toLowerCase() === 'claude'
+          && !failoverEnabled(task.agent_config)) {
+        // #602: explicit opt-in per-agent Claude Code session dispatch. This
+        // branch deliberately outranks gateway availability, target_session,
+        // and callDirectly — a claude-runtime agent never falls back to a
+        // less restrictive provider; failures surface as dispatch failures.
+        //
+        // Exception: an agent with credentialRotation enabled falls through to
+        // callDirectly instead, because rotation/usage-limit failover across
+        // several credential dirs is implemented there and the single-session
+        // path can't express it. Claude agents without rotation configured —
+        // the default — keep the upstream session-forking behavior.
+        agentResponse = await dispatchViaClaudeSession(task, prompt)
+      } else if (useDirectApi) {
+        // Direct dispatch — provider chosen by the agent's runtime_type
+        // (claude/codex/hermes via pickRuntimeRoute), else by `dispatchModel`
+        // prefix (Anthropic / OpenAI / local). No gateway needed.
         // A target_session is a gateway-only concept: with no gateway there is
         // no session to continue, so run the task rather than failing forever.
         if (targetSession) {
@@ -2173,7 +2283,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
         db.prepare('UPDATE agents SET rate_limited_until = ?, updated_at = ? WHERE id = ? AND workspace_id = ?')
           .run(fnow + ratelimitCooldownMinutes() * 60, fnow, task.agent_id, task.workspace_id)
 
-        const next = pickFailoverAgent(task.runtime_type, task.workspace_id, task.agent_id, fnow)
+        const next = pickFailoverAgent(task.agent_runtime_type, task.workspace_id, task.agent_id, fnow)
         if (next) {
           const partial = typeof err.partialOutput === 'string' && err.partialOutput.trim()
             ? err.partialOutput.trim().slice(0, 8000)
