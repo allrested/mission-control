@@ -1,21 +1,30 @@
-# Dokploy / Traefik overlay — everything specific to the Dokploy host lives
-# here, so the base docker-compose.yml stays plain Docker and works locally
-# with no Traefik and no external network.
+# Dokploy / Traefik deployment file — SELF-CONTAINED.
 #
-# Deploy on the server:
-#   docker compose -f docker-compose.yml -f docker-compose.dokploy.yml up -d
+# Deploy with this file ALONE (Dokploy points at one compose file):
+#   docker compose -f docker-compose.dokploy.yml up -d
 #
-# Required in .env on that server:
+# It `extends` each service from docker-compose.yml, so image/build, ports,
+# environment and volumes all come from there — one source of truth — and this
+# file only adds what's Dokploy-specific: Traefik routing labels and the
+# external dokploy-network. Local runs still use plain docker-compose.yml with
+# no Traefik.
+#
+# NOTE: `extends` does NOT carry over depends_on, and top-level volumes/networks
+# must be declared here too — both are restated below.
+#
+# Required in .env on the server:
 #   MC_DOMAIN=ai.flavours.sa
 #   HERMES_DOMAIN=chat.flavours.sa
 #   IDE_DOMAIN=ide.flavours.sa
 #   IDE_PUBLIC_URL=https://ide.flavours.sa      # what the "Open IDE" button links to
 #   MC_ALLOWED_HOSTS=ai.flavours.sa,chat.flavours.sa,mission-control,localhost,127.0.0.1,::1
+#   MC_API_KEY=<the key from .data/.generated-secrets>
 #   MC_BIND=127.0.0.1                            # don't expose 3000/9119 on the public IP
+#   MC_REPOS_DIR=/path/to/shared/repos           # host dir shared by all users
 #   TRAEFIK_CERTRESOLVER=letsencrypt             # match your Dokploy resolver name
 #
-# Ports do not need publishing for routing — Traefik reaches each container
-# over dokploy-network. The publishes in the base file stay loopback-bound.
+# Traefik reaches each container over dokploy-network, so no port needs to be
+# published for routing; the base file's publishes stay loopback-bound.
 #
 # Cloudflare: A/CNAME for ai, chat, ide → the server; proxied is fine
 # (WebSockets are on by default and code-server's terminal needs them).
@@ -23,6 +32,9 @@
 
 services:
   mission-control:
+    extends:
+      file: docker-compose.yml
+      service: mission-control
     networks:
       - mc-net
       - dokploy-network
@@ -45,6 +57,12 @@ services:
       - traefik.http.services.mchermes.loadbalancer.server.port=9119
 
   mc-devshell:
+    extends:
+      file: docker-compose.yml
+      service: mc-devshell
+    # extends drops depends_on — restate it.
+    depends_on:
+      - mission-control
     networks:
       - mc-net
       - dokploy-network
@@ -60,6 +78,12 @@ services:
       - traefik.http.routers.mcide.service=mcide
       - traefik.http.services.mcide.loadbalancer.server.port=8443
 
+volumes:
+  mc-data:
+  mc-homes:
+
 networks:
+  mc-net:
+    driver: bridge
   dokploy-network:
     external: true
