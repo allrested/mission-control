@@ -1,14 +1,11 @@
-# Dokploy / Traefik overlay — attaches the containers to Dokploy's shared
-# network so its Traefik instance can route the domains declared in the base
-# file's labels. Kept as an overlay (not in docker-compose.yml) because
-# `dokploy-network` is external: declaring it in the base file would break a
-# plain local `docker compose up` on a machine that has no Dokploy.
+# Dokploy / Traefik overlay — everything specific to the Dokploy host lives
+# here, so the base docker-compose.yml stays plain Docker and works locally
+# with no Traefik and no external network.
 #
 # Deploy on the server:
 #   docker compose -f docker-compose.yml -f docker-compose.dokploy.yml up -d
 #
 # Required in .env on that server:
-#   TRAEFIK_ENABLE=true
 #   MC_DOMAIN=ai.flavours.sa
 #   HERMES_DOMAIN=chat.flavours.sa
 #   IDE_DOMAIN=ide.flavours.sa
@@ -17,8 +14,11 @@
 #   MC_BIND=127.0.0.1                            # don't expose 3000/9119 on the public IP
 #   TRAEFIK_CERTRESOLVER=letsencrypt             # match your Dokploy resolver name
 #
+# Ports do not need publishing for routing — Traefik reaches each container
+# over dokploy-network. The publishes in the base file stay loopback-bound.
+#
 # Cloudflare: A/CNAME for ai, chat, ide → the server; proxied is fine
-# (WebSockets are enabled by default and code-server's terminal needs them).
+# (WebSockets are on by default and code-server's terminal needs them).
 # Use SSL/TLS mode "Full (strict)" since Traefik holds a real certificate.
 
 services:
@@ -26,11 +26,39 @@ services:
     networks:
       - mc-net
       - dokploy-network
+    labels:
+      # Two routers on one container: the app (3000) and the hermes dashboard
+      # (9119), each needs its own named service.
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      # Mission Control
+      - traefik.http.routers.mc.rule=Host(`${MC_DOMAIN:?set MC_DOMAIN}`)
+      - traefik.http.routers.mc.entrypoints=websecure
+      - traefik.http.routers.mc.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      - traefik.http.routers.mc.service=mc
+      - traefik.http.services.mc.loadbalancer.server.port=${PORT:-3000}
+      # Hermes dashboard
+      - traefik.http.routers.mchermes.rule=Host(`${HERMES_DOMAIN:?set HERMES_DOMAIN}`)
+      - traefik.http.routers.mchermes.entrypoints=websecure
+      - traefik.http.routers.mchermes.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      - traefik.http.routers.mchermes.service=mchermes
+      - traefik.http.services.mchermes.loadbalancer.server.port=9119
 
   mc-devshell:
     networks:
       - mc-net
       - dokploy-network
+    labels:
+      # Browser IDE. Traefik proxies WebSockets natively, which code-server's
+      # terminal requires. Its X-Forwarded-Proto: https is also what makes the
+      # IDE session cookie Secure (see devshell/ide-proxy/server.js).
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      - traefik.http.routers.mcide.rule=Host(`${IDE_DOMAIN:?set IDE_DOMAIN}`)
+      - traefik.http.routers.mcide.entrypoints=websecure
+      - traefik.http.routers.mcide.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      - traefik.http.routers.mcide.service=mcide
+      - traefik.http.services.mcide.loadbalancer.server.port=8443
 
 networks:
   dokploy-network:
